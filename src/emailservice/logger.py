@@ -15,11 +15,13 @@
 # limitations under the License.
 
 import logging
+import os
 import sys
+
+from opentelemetry import trace
 from pythonjsonlogger import jsonlogger
 
-# TODO(yoshifumi) this class is duplicated since other Python services are
-# not sharing the modules for logging.
+
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
   def add_fields(self, log_record, record, message_dict):
     super(CustomJsonFormatter, self).add_fields(log_record, record, message_dict)
@@ -30,12 +32,34 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
     else:
       log_record['severity'] = record.levelname
 
+    pod = os.environ.get('K8S_POD_NAME')
+    if pod:
+      log_record['k8s.pod.name'] = pod
+    namespace = os.environ.get('K8S_NAMESPACE')
+    if namespace:
+      log_record['k8s.namespace.name'] = namespace
+
+    span = trace.get_current_span()
+    span_context = span.get_span_context()
+    if span_context.is_valid:
+      log_record['trace_id'] = format(span_context.trace_id, '032x')
+      log_record['span_id'] = format(span_context.span_id, '016x')
+      log_record['log_type'] = 'application'
+
+
 def getJSONLogger(name):
   logger = logging.getLogger(name)
+  if logger.handlers:
+    return logger
+
+  logger.setLevel(logging.INFO)
+  logger.propagate = False
+
+  if os.environ.get('OTEL_LOGS_EXPORTER') == 'otlp':
+    return logger
+
   handler = logging.StreamHandler(sys.stdout)
   formatter = CustomJsonFormatter('%(timestamp)s %(severity)s %(name)s %(message)s')
   handler.setFormatter(formatter)
   logger.addHandler(handler)
-  logger.setLevel(logging.INFO)
-  logger.propagate = False
   return logger

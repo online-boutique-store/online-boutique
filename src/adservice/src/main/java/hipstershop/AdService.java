@@ -56,6 +56,7 @@ public final class AdService {
 
     server =
         ServerBuilder.forPort(port)
+            .intercept(new LogCorrelationInterceptor())
             .addService(new AdServiceImpl())
             .addService(healthMgr.getHealthService())
             .build()

@@ -1,0 +1,41 @@
+{
+  "time": {
+    "$resolver": "timestamp",
+    "pattern": {
+      "format": "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+      "timeZone": "UTC"
+    }
+  },
+  "level": {
+    "$resolver": "level",
+    "field": "name"
+  },
+  "logger": {
+    "$resolver": "logger",
+    "field": "name"
+  },
+  "message": {
+    "$resolver": "message",
+    "stringified": true
+  },
+  "trace_id": {
+    "$resolver": "mdc",
+    "key": "trace_id"
+  },
+  "span_id": {
+    "$resolver": "mdc",
+    "key": "span_id"
+  },
+  "k8s.pod.name": {
+    "$resolver": "pattern",
+    "pattern": "${env:K8S_POD_NAME}"
+  },
+  "k8s.namespace.name": {
+    "$resolver": "pattern",
+    "pattern": "${env:K8S_NAMESPACE}"
+  },
+  "log_type": {
+    "$resolver": "mdc",
+    "key": "log_type"
+  }
+}

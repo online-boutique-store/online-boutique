@@ -1,0 +1,502 @@
+# OpenTelemetry collector that receives app telemetry and forwards traces/logs to Observe.
+# See: https://docs.observeinc.com/docs/configure-your-own-otel-collector
+#
+# Before applying:
+#   1. Create an ingest token in Observe (Data & integrations > Add data)
+#   2. Replace OBSERVE_TOKEN and OBSERVE_OTEL_ENDPOINT in the secret below
+#   3. kubectl apply -f deploy/observe/observe-otel-collector.yaml
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: observe-otel-credentials
+type: Opaque
+stringData:
+  OBSERVE_TOKEN: "ds1xwLGe048d8jQkD2dz:a94WbtG91SrLlknE1E5m5NLtKEuWP69q"
+  OBSERVE_OTEL_ENDPOINT: "https://145056927297.collect.observeinc.com/v2/otel"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observe-otel-collector-config
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      filelog:
+        include:
+          - /var/log/pods/default_*/*/*.log
+        exclude:
+          - /var/log/pods/default_observe-otel-collector_*/*/*.log
+          - /var/log/pods/default_loadgenerator_*/*/*.log
+        start_at: end
+        include_file_path: true
+        include_file_name: false
+        operators:
+          # Parse containerd log format: timestamp stream flags message
+          - type: regex_parser
+            id: parse-containerd
+            regex: '^(?P<time>[^ ]+) (?P<stream>stdout|stderr) [^ ]* (?P<log>.*)$'
+            timestamp:
+              parse_from: attributes.time
+              layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+          # Move parsed log field to body
+          - type: move
+            from: attributes.log
+            to: body
+          # Parse JSON body — extracts trace_id, span_id, severity, etc. into attributes
+          - type: json_parser
+            on_error: drop
+          # Extract service name from file path
+          # Path format: /var/log/pods/default_<service>-<rs-hash>-<pod-hash>/<container>/<n>.log
+          - type: regex_parser
+            id: extract-service
+            parse_from: attributes["log.file.path"]
+            regex: '/var/log/pods/[^_]+_(?P<service_name>[a-z]+)[^/]*/'
+            preserve_to: attributes["log.file.path"]
+          - type: add
+            field: resource["service.name"]
+            value: EXPR(attributes["service_name"])
+          - type: remove
+            field: attributes.service_name
+
+    connectors:
+      spanmetrics:
+        aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
+        dimensions:
+          - name: service.namespace
+          - name: service.version
+          - name: deployment.environment.name
+          - name: k8s.pod.name
+          - name: k8s.namespace.name
+          - name: peer.db.name
+          - name: peer.messaging.system
+          - name: otel.status_description
+          - name: observe.status_code
+        histogram:
+          exponential:
+            max_size: 100
+        resource_metrics_key_attributes:
+          - service.name
+          - service.namespace
+          - service.version
+          - deployment.environment.name
+          - k8s.pod.name
+          - k8s.namespace.name
+      spanmetrics/summary:
+        aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
+        dimensions:
+          - name: service.namespace
+          - name: service.version
+          - name: deployment.environment.name
+          - name: peer.db.name
+          - name: peer.messaging.system
+          - name: observe.status_code
+        histogram:
+          exponential:
+            max_size: 100
+        resource_metrics_key_attributes:
+          - service.name
+          - service.namespace
+          - service.version
+          - deployment.environment.name
+
+    processors:
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 80
+        spike_limit_percentage: 15
+      batch:
+        send_batch_max_size: 4096
+        send_batch_size: 4096
+        timeout: 5s
+      resource:
+        attributes:
+          - key: deployment.environment.name
+            value: production
+            action: upsert
+      transform/team_attribution:
+        trace_statements:
+          - context: resource
+            statements:
+              - set(attributes["team"], "storefront") where attributes["service.name"] == "frontend"
+              - set(attributes["team"], "catalog") where attributes["service.name"] == "productcatalogservice"
+              - set(attributes["team"], "catalog") where attributes["service.name"] == "recommendationservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "checkoutservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "paymentservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "currencyservice"
+              - set(attributes["team"], "fulfillment") where attributes["service.name"] == "shippingservice"
+              - set(attributes["team"], "fulfillment") where attributes["service.name"] == "emailservice"
+              - set(attributes["team"], "platform") where attributes["service.name"] == "cartservice"
+              - set(attributes["team"], "platform") where attributes["service.name"] == "adservice"
+        log_statements:
+          - context: resource
+            statements:
+              - set(attributes["team"], "storefront") where attributes["service.name"] == "frontend"
+              - set(attributes["team"], "catalog") where attributes["service.name"] == "productcatalogservice"
+              - set(attributes["team"], "catalog") where attributes["service.name"] == "recommendationservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "checkoutservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "paymentservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "currencyservice"
+              - set(attributes["team"], "fulfillment") where attributes["service.name"] == "shippingservice"
+              - set(attributes["team"], "fulfillment") where attributes["service.name"] == "emailservice"
+              - set(attributes["team"], "platform") where attributes["service.name"] == "cartservice"
+              - set(attributes["team"], "platform") where attributes["service.name"] == "adservice"
+        metric_statements:
+          - context: resource
+            statements:
+              - set(attributes["team"], "storefront") where attributes["service.name"] == "frontend"
+              - set(attributes["team"], "catalog") where attributes["service.name"] == "productcatalogservice"
+              - set(attributes["team"], "catalog") where attributes["service.name"] == "recommendationservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "checkoutservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "paymentservice"
+              - set(attributes["team"], "checkout") where attributes["service.name"] == "currencyservice"
+              - set(attributes["team"], "fulfillment") where attributes["service.name"] == "shippingservice"
+              - set(attributes["team"], "fulfillment") where attributes["service.name"] == "emailservice"
+              - set(attributes["team"], "platform") where attributes["service.name"] == "cartservice"
+              - set(attributes["team"], "platform") where attributes["service.name"] == "adservice"
+
+      transform/add_span_status_code:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - set(attributes["observe.status_code"], Int(attributes["rpc.grpc.status_code"])) where attributes["observe.status_code"] == nil and attributes["rpc.grpc.status_code"] != nil
+              - set(attributes["observe.status_code"], Int(attributes["grpc.status_code"])) where attributes["observe.status_code"] == nil and attributes["grpc.status_code"] != nil
+              - set(attributes["observe.status_code"], Int(attributes["rpc.status_code"])) where attributes["observe.status_code"] == nil and attributes["rpc.status_code"] != nil
+              - set(attributes["observe.status_code"], Int(attributes["http.status_code"])) where attributes["observe.status_code"] == nil and attributes["http.status_code"] != nil
+              - set(attributes["observe.status_code"], Int(attributes["http.response.status_code"])) where attributes["observe.status_code"] == nil and attributes["http.response.status_code"] != nil
+
+      filter/drop_long_spans:
+        error_mode: ignore
+        traces:
+          span:
+            - (end_time - start_time) > Duration("1h")
+
+      filter/drop_non_apm_spans:
+        error_mode: ignore
+        traces:
+          span:
+            - kind == SPAN_KIND_CLIENT and attributes["peer.db.name"] == nil and attributes["db.system.name"] == nil and attributes["db.system"] == nil
+            - kind == SPAN_KIND_PRODUCER and attributes["peer.messaging.system"] == nil and attributes["messaging.system"] == nil
+            - kind == SPAN_KIND_UNSPECIFIED
+            - kind == SPAN_KIND_INTERNAL
+
+      transform/shape_spans_for_red_metrics:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - set(attributes["peer.db.name"], attributes["db.system.name"]) where attributes["peer.db.name"] == nil and attributes["db.system.name"] != nil
+              - set(attributes["peer.db.name"], attributes["db.system"]) where attributes["peer.db.name"] == nil and attributes["db.system"] != nil
+              - set(attributes["peer.messaging.system"], attributes["messaging.system"]) where attributes["peer.messaging.system"] == nil and attributes["messaging.system"] != nil
+              - set(attributes["otel.status_description"], status.message) where status.message != ""
+
+      groupbyattrs/peers:
+        keys:
+          - peer.db.name
+          - peer.messaging.system
+
+      transform/promote_peer_to_service:
+        error_mode: ignore
+        trace_statements:
+          - context: resource
+            statements:
+              - set(attributes["service.name"], attributes["peer.db.name"]) where attributes["peer.db.name"] != nil
+              - set(attributes["service.name"], attributes["peer.messaging.system"]) where attributes["peer.messaging.system"] != nil and attributes["peer.db.name"] == nil
+          - context: span
+            statements:
+              - set(attributes["peer.db.name"], resource.attributes["peer.db.name"]) where resource.attributes["peer.db.name"] != nil
+              - set(attributes["peer.messaging.system"], resource.attributes["peer.messaging.system"]) where resource.attributes["peer.messaging.system"] != nil
+          - context: resource
+            statements:
+              - delete_key(attributes, "peer.db.name")
+              - delete_key(attributes, "peer.messaging.system")
+
+      transform/add_empty_service_attributes:
+        error_mode: ignore
+        trace_statements:
+          - context: resource
+            statements:
+              - set(attributes["deployment.environment.name"], attributes["deployment.environment"]) where attributes["deployment.environment.name"] == nil and attributes["deployment.environment"] != nil
+              - set(attributes["deployment.environment"], attributes["deployment.environment.name"]) where attributes["deployment.environment"] == nil and attributes["deployment.environment.name"] != nil
+              - set(attributes["service.name"], "") where attributes["service.name"] == nil
+              - set(attributes["service.namespace"], "") where attributes["service.namespace"] == nil
+              - set(attributes["deployment.environment.name"], "") where attributes["deployment.environment.name"] == nil
+              - set(attributes["deployment.environment"], "") where attributes["deployment.environment"] == nil
+
+      transform/remove_service_name_for_peer_metrics:
+        error_mode: ignore
+        metric_statements:
+          - context: datapoint
+            statements:
+              - delete_key(resource.attributes, "service.name") where attributes["peer.db.name"] != nil or attributes["peer.messaging.system"] != nil
+
+      transform/fix_red_metrics_resource_attributes:
+        error_mode: ignore
+        metric_statements:
+          - context: datapoint
+            statements:
+              - keep_matching_keys(resource.attributes, "^(service.name|service.namespace|service.version|deployment.environment.name|k8s.pod.name|k8s.namespace.name)")
+              - delete_matching_keys(attributes, "^(service.name|service.namespace|service.version|deployment.environment.name|k8s.pod.name|k8s.namespace.name)")
+              - set(attributes["otel.status_code"], "OK") where attributes["status.code"] == "STATUS_CODE_OK"
+              - set(attributes["otel.status_code"], "ERROR") where attributes["status.code"] == "STATUS_CODE_ERROR"
+              - delete_key(attributes, "status.code")
+
+      transform/fix_red_metrics_resource_attributes/summary:
+        error_mode: ignore
+        metric_statements:
+          - context: datapoint
+            statements:
+              - keep_matching_keys(resource.attributes, "^(service.name|service.namespace|service.version|deployment.environment.name)")
+              - delete_matching_keys(attributes, "^(service.name|service.namespace|service.version|deployment.environment.name)")
+              - set(attributes["otel.status_code"], "OK") where attributes["status.code"] == "STATUS_CODE_OK"
+              - set(attributes["otel.status_code"], "ERROR") where attributes["status.code"] == "STATUS_CODE_ERROR"
+              - delete_key(attributes, "status.code")
+
+      metricstransform/rename_summary_metrics:
+        transforms:
+          - action: update
+            include: traces.span.metrics.calls
+            new_name: traces.span.metrics.calls.summary
+          - action: update
+            include: traces.span.metrics.duration
+            new_name: traces.span.metrics.duration.summary
+
+    exporters:
+      otlphttp/observe/traces:
+        compression: zstd
+        endpoint: ${env:OBSERVE_OTEL_ENDPOINT}
+        headers:
+          authorization: Bearer ${env:OBSERVE_TOKEN}
+          x-observe-target-package: Tracing
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_elapsed_time: 5m
+          max_interval: 30s
+        sending_queue:
+          enabled: true
+      otlphttp/observe/logs:
+        compression: zstd
+        endpoint: ${env:OBSERVE_OTEL_ENDPOINT}
+        headers:
+          authorization: Bearer ${env:OBSERVE_TOKEN}
+          x-observe-target-package: Kubernetes Explorer
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_elapsed_time: 5m
+          max_interval: 30s
+        sending_queue:
+          enabled: true
+      otlphttp/observe/metrics:
+        compression: zstd
+        endpoint: ${env:OBSERVE_OTEL_ENDPOINT}
+        headers:
+          authorization: Bearer ${env:OBSERVE_TOKEN}
+          x-observe-target-package: Metrics
+        retry_on_failure:
+          enabled: true
+          initial_interval: 1s
+          max_elapsed_time: 5m
+          max_interval: 30s
+        sending_queue:
+          enabled: true
+      debug/traces:
+        verbosity: basic
+        sampling_initial: 2
+        sampling_thereafter: 500
+
+    service:
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+          level: detailed
+      pipelines:
+        traces/spanmetrics:
+          receivers: [otlp]
+          processors:
+            - memory_limiter
+            - filter/drop_long_spans
+            - filter/drop_non_apm_spans
+            - transform/shape_spans_for_red_metrics
+            - transform/add_span_status_code
+            - groupbyattrs/peers
+            - transform/promote_peer_to_service
+            - transform/add_empty_service_attributes
+          exporters: [spanmetrics, spanmetrics/summary]
+        traces/observe:
+          receivers: [otlp]
+          processors:
+            - memory_limiter
+            - filter/drop_long_spans
+            - transform/add_span_status_code
+            - batch
+            - resource
+            - transform/team_attribution
+          exporters: [otlphttp/observe/traces, debug/traces]
+        metrics/spanmetrics:
+          receivers: [spanmetrics]
+          processors:
+            - memory_limiter
+            - transform/remove_service_name_for_peer_metrics
+            - transform/fix_red_metrics_resource_attributes
+            - batch
+            - resource
+            - transform/team_attribution
+          exporters: [otlphttp/observe/metrics]
+        metrics/spanmetrics/summary:
+          receivers: [spanmetrics/summary]
+          processors:
+            - memory_limiter
+            - transform/remove_service_name_for_peer_metrics
+            - transform/fix_red_metrics_resource_attributes/summary
+            - metricstransform/rename_summary_metrics
+            - batch
+            - resource
+            - transform/team_attribution
+          exporters: [otlphttp/observe/metrics]
+        metrics/observe:
+          receivers: [otlp]
+          processors:
+            - memory_limiter
+            - batch
+            - resource
+            - transform/team_attribution
+          exporters: [otlphttp/observe/metrics]
+        logs/observe:
+          receivers: [otlp, filelog]
+          processors:
+            - memory_limiter
+            - batch
+            - resource
+            - transform/team_attribution
+          exporters: [otlphttp/observe/logs]
+---
+# ClusterRole to allow the collector to read pod/node metadata
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: observe-otel-collector
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: observe-otel-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: observe-otel-collector
+subjects:
+  - kind: ServiceAccount
+    name: observe-otel-collector
+    namespace: default
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: observe-otel-collector
+  namespace: default
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: observe-otel-collector
+  labels:
+    app: observe-otel-collector
+spec:
+  selector:
+    matchLabels:
+      app: observe-otel-collector
+  template:
+    metadata:
+      labels:
+        app: observe-otel-collector
+    spec:
+      serviceAccountName: observe-otel-collector
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.105.0
+          args:
+            - --config=/conf/collector.yaml
+          env:
+            - name: OBSERVE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: observe-otel-credentials
+                  key: OBSERVE_TOKEN
+            - name: OBSERVE_OTEL_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: observe-otel-credentials
+                  key: OBSERVE_OTEL_ENDPOINT
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: metrics
+              containerPort: 8888
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: observe-otel-collector-config
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observe-otel-collector
+  labels:
+    app: observe-otel-collector
+spec:
+  type: ClusterIP
+  selector:
+    app: observe-otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318

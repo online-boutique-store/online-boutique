@@ -37,6 +37,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"google.golang.org/grpc"
 )
 
@@ -52,23 +53,20 @@ var (
 
 func init() {
 	log = logrus.New()
-	log.Formatter = &logrus.JSONFormatter{
-		FieldMap: logrus.FieldMap{
-			logrus.FieldKeyTime:  "timestamp",
-			logrus.FieldKeyLevel: "severity",
-			logrus.FieldKeyMsg:   "message",
-		},
-		TimestampFormat: time.RFC3339Nano,
-	}
-	log.Out = os.Stdout
+	log.Level = logrus.DebugLevel
+	configureLogrus(log)
 	catalogMutex = &sync.Mutex{}
 }
 
 func main() {
+	setupOtelLogging(log, "productcatalogservice")
+
 	if os.Getenv("ENABLE_TRACING") == "1" {
 		err := initTracing()
 		if err != nil {
 			log.Warnf("warn: failed to start tracer: %+v", err)
+		} else {
+			log.Info("Tracing enabled.")
 		}
 	} else {
 		log.Info("Tracing disabled.")
@@ -168,8 +166,16 @@ func initTracing() error {
 	if err != nil {
 		log.Warnf("warn: Failed to create trace exporter: %v", err)
 	}
+	res, err := resource.New(ctx,
+		resource.WithFromEnv(),
+		resource.WithTelemetrySDK(),
+	)
+	if err != nil {
+		log.Warnf("warn: Failed to create trace resource: %v", err)
+	}
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	otel.SetTracerProvider(tp)
 	return err
