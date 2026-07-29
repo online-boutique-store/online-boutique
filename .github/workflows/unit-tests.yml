@@ -1,0 +1,101 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel in-progress runs on the same branch when a new run is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Go services ──────────────────────────────────────────────────────────────
+  # Tests exist in: shippingservice, productcatalogservice, checkoutservice (money),
+  # and frontend (money, validator). All use `go test ./...` from the service root.
+  test-go:
+    name: Go – ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: shippingservice
+            directory: src/shippingservice
+          - service: productcatalogservice
+            directory: src/productcatalogservice
+          - service: checkoutservice
+            directory: src/checkoutservice
+          - service: frontend
+            directory: src/frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # setup-go v5 reads the Go version from go.mod and caches modules + build cache
+      # automatically when go-version-file and cache-dependency-path are set.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.directory }}/go.mod
+          cache-dependency-path: ${{ matrix.directory }}/go.sum
+
+      - name: Run unit tests
+        working-directory: ${{ matrix.directory }}
+        run: go test ./... -v -count=1
+
+  # ── .NET service ─────────────────────────────────────────────────────────────
+  # cartservice is the only service with an xUnit test project (src/cartservice/tests/).
+  test-dotnet:
+    name: .NET – cartservice
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+
+      # Cache NuGet packages to speed up subsequent runs
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('src/cartservice/**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore dependencies
+        run: dotnet restore src/cartservice/
+
+      - name: Run tests
+        run: dotnet test src/cartservice/ --no-restore --verbosity normal
+
+  # ── Summary ──────────────────────────────────────────────────────────────────
+  # Provides a single job name for branch protection rules to target.
+  unit-tests:
+    name: All unit tests passed
+    runs-on: ubuntu-latest
+    needs: [test-go, test-dotnet]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          go_result="${{ needs.test-go.result }}"
+          dotnet_result="${{ needs.test-dotnet.result }}"
+          if [[ "$go_result" == "failure" || "$dotnet_result" == "failure" ]]; then
+            echo "One or more test jobs failed (go=$go_result dotnet=$dotnet_result)."
+            exit 1
+          fi
+          echo "All test jobs passed or were skipped."

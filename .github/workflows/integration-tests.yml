@@ -1,0 +1,73 @@
+name: Integration Tests
+
+on:
+  schedule:
+    # Run every 4 hours to exercise multi-service flows continuously
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+# Allow only one integration test run at a time; don't cancel in-progress runs
+# so we always get a complete result.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Application flow
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # Set FRONTEND_URL as a repository secret pointing to the deployed frontend.
+      # Example: http://a1b2c3.us-east-1.elb.amazonaws.com
+      FRONTEND_URL: ${{ secrets.FRONTEND_URL || 'http://a181aaa9fa0594ec68a7a1f803f99586-1700447454.us-west-2.elb.amazonaws.com' }}
+      REQUEST_TIMEOUT: "15"
+      MAX_RETRIES: "3"
+      RETRY_DELAY: "3"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Print target URL
+        run: echo "Target: ${FRONTEND_URL}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Cache pip packages so the install step is fast on repeated runs
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-requests
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install test dependencies
+        run: pip install --quiet requests
+
+      # ── Test execution ──────────────────────────────────────────────────────
+      # scripts/integration_test.py exercises a full shopping flow:
+      #   homepage → product page → add to cart → view cart → checkout
+      # It writes integration-test-results.json on completion (pass or fail).
+      - name: Run integration tests
+        run: python3 scripts/integration_test.py 2>&1 | tee integration-test-output.txt
+
+      # ── Artifact upload ─────────────────────────────────────────────────────
+      # Always upload results so failed runs are diagnosable from the Actions UI.
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-${{ github.run_id }}
+          path: |
+            integration-test-results.json
+            integration-test-output.txt
+          retention-days: 30
