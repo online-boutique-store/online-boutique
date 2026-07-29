@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-REGION="${AWS_REGION:-us-east-1}"
+REGION="${AWS_REGION:-us-west-2}"
 CLUSTER_NAME="${EKS_CLUSTER_NAME:-online-boutique}"
 REPO_NAME="${ECR_REPO_NAME:-online-boutique}"
 SKIP_CLUSTER=false
