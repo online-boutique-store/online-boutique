@@ -2,35 +2,67 @@
 
 Instrument the app with OpenTelemetry and forward traces and metrics to [Observe](https://docs.observeinc.com/docs/apm-instrumentation). Application logs are emitted as JSON on stdout and collected by the Observe Kubernetes agent (not via OTLP logs).
 
+> **Deploying fresh?** Install the **Observe Kubernetes agent** in your
+> cluster from the Observe UI (Data & integrations > Add data > Kubernetes),
+> then run `deploy/aws/deploy.sh` — it deploys the app, with every service
+> already pointed at the agent's forwarder, in one step (see
+> [Fresh cluster redeploy](#fresh-cluster-redeploy-new-aws-account--eks)
+> below). No Observe credentials live in this repo at all — the agent holds
+> its own ingest token from its own install flow. Everything under "Manual /
+> legacy instrumentation flow" describes the older imperative flow
+> (`patch-tracing-env.sh`, `bootstrap-observe.sh`), kept only for clusters
+> already bootstrapped that way.
+
 ## Architecture
 
 ```
-Microservices ──OTLP/gRPC──► observe-otel-collector:4317 ──► Observe (traces + metrics)
-Microservices ──stdout JSON──► filelog receiver ──► Observe Kubernetes Explorer (logs)
+Microservices ──OTLP/gRPC──► observe-agent-forwarder.observe.svc.cluster.local:4317 ──► Observe
+Microservices ──stdout JSON──► Observe Kubernetes agent (log collection) ──► Observe
 ```
 
-The repo includes an optional standalone `observe-otel-collector.yaml` if you are not using the Observe Kubernetes agent.
+`deploy/observe/kustomization.yaml` layers on top of `deploy/aws/kustomization.yaml` (which layers on `kubernetes-manifests/` and rewrites image names to your ECR repo) — it does **not** reference `kubernetes-manifests/` directly, because doing so would apply the OTEL patches over bare `image: frontend`-style names and produce `ErrImagePull` on EKS. `deploy/observe` = `deploy/aws` + OTEL patches, pointed at the Observe agent's in-cluster forwarder Service.
 
 ## Fresh cluster redeploy (new AWS account / EKS)
 
 From a machine with `aws`, `eksctl`, `docker`, and `kubectl` configured for the new account:
 
 ```bash
-# 1. ECR + EKS + build/push images + apply manifests (~20–30 min)
+# 1. Install the Observe Kubernetes agent (Observe UI: Data & integrations >
+#    Add data > Kubernetes) — this creates the `observe` namespace and the
+#    observe-agent-forwarder Service that apps send OTLP to. Can be done
+#    before or after step 2; no telemetry arrives until it's installed.
+
+# 2. ECR + EKS + build/push images + apply manifests, already instrumented
+#    (~20–30 min)
 ./deploy/aws/deploy.sh
 
-# 2. Observe collector + OTEL env vars + optional load generator
-./deploy/observe/bootstrap-observe.sh --with-loadgenerator
+# 3. Optional: load generator for continuous traffic
+./deploy/observe/deploy-loadgenerator.sh
 ```
 
-`deploy/aws/deploy.sh` auto-detects the AWS account ID and creates `online-boutique` ECR + EKS in `us-east-1`. Override with `AWS_REGION`, `EKS_CLUSTER_NAME`, or `ECR_REPO_NAME` if needed.
+`deploy/aws/deploy.sh` auto-detects the AWS account ID and creates `online-boutique` ECR + EKS in `us-east-1`. Override with `AWS_REGION`, `EKS_CLUSTER_NAME`, or `ECR_REPO_NAME` if needed. It always applies `deploy/observe` (app + OTEL instrumentation, with images rewritten to ECR); to deploy without any OTEL env vars, apply `deploy/aws` directly instead.
 
-If you use the **Observe Kubernetes agent** instead of the standalone collector, install it from the Observe UI first, then run only `patch-tracing-env.sh` (no `OTEL_COLLECTOR_*` overrides).
+Each service gets one small patch (`patches/*.yaml`) adding `ENABLE_TRACING=1`, the forwarder endpoint, `OTEL_SERVICE_NAME`, `K8S_POD_NAME`/`K8S_NAMESPACE` (log correlation), and `imagePullPolicy: Always`. adservice's patch also activates its baked-in OTel Java agent. Verify with:
+
+```bash
+kubectl rollout status deployment/frontend
+kubectl logs deployment/frontend --tail=5 | grep trace_id
+```
+
+**Updating `service.version` for deployment markers:** it defaults to `1.0.0` in the `OTEL_RESOURCE_ATTRIBUTES` literal of `kustomization.yaml`. To stamp a real version (e.g. from CI), edit that literal — e.g. to `$GIT_SHA` — as part of your release step, then re-apply. This stays a declarative manifest change, not a live `kubectl set env` against a running cluster.
+
+> **Standalone / generic OTel collector:** a self-hosted `otelcol-contrib` DaemonSet with a richer processing pipeline (RED metrics, team-attribution, span filtering) lives on the `feat/generic-otel-collection` branch if you need it.
+
+**Applying `deploy/observe` outside of `deploy.sh`:** it depends on `deploy/aws/kustomization.yaml` having real values in place of `ECR_URI_PLACEHOLDER` (normally substituted transiently by `deploy.sh` via a `sed` pipe, never written to disk). Applying it standalone without that substitution will deploy pods with a literal, non-existent image registry.
+
+## Manual / legacy instrumentation flow
+
+The steps below patch a plain, already-deployed cluster after the fact with `kubectl set env` / `kubectl patch`. Kept for existing clusters bootstrapped this way before the Kustomize setup above existed — prefer `kubectl apply -k deploy/observe` for anything new.
 
 ## 1. Prerequisites
 
 - EKS cluster with Online Boutique deployed
-- Observe Kubernetes agent installed in the `observe` namespace with an OTLP forwarder at `observe-agent-forwarder.observe.svc.cluster.local:4317` **or** the standalone collector from `observe-otel-collector.yaml`
+- Observe Kubernetes agent installed in the `observe` namespace with an OTLP forwarder at `observe-agent-forwarder.observe.svc.cluster.local:4317`
 
 ## 2. Rebuild and push images
 
@@ -72,16 +104,6 @@ This script sets, for every microservice deployment:
 - `imagePullPolicy: Always` (required when pushing to fixed image tags)
 
 For adservice it also sets the pinned OpenTelemetry Java agent via `JAVA_TOOL_OPTIONS`.
-
-Optional: deploy the standalone collector instead of using the Observe agent forwarder:
-
-```bash
-# Edit observe-otel-collector.yaml with your Observe ingest token first
-kubectl apply -f deploy/observe/observe-otel-collector.yaml
-OTEL_COLLECTOR_ADDR=observe-otel-collector:4317 \
-OTEL_COLLECTOR_OTLP=http://observe-otel-collector:4317 \
-  ./deploy/observe/patch-tracing-env.sh
-```
 
 ## Instrumentation by language
 
