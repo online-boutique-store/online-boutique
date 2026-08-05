@@ -20,6 +20,9 @@ function initTelemetry(serviceName) {
   const { OTLPLogExporter } = require('@opentelemetry/exporter-logs-otlp-grpc');
   const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
   const { BatchLogRecordProcessor } = require('@opentelemetry/sdk-logs');
+  // Baggage propagation is enabled via the OTEL_PROPAGATORS=tracecontext,baggage
+  // env var (set in the observe-otel-env ConfigMap), which the NodeSDK reads
+  // automatically — no manual propagator setup needed here.
 
   const collectorUrl = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
     || process.env.COLLECTOR_SERVICE_ADDR
@@ -65,4 +68,23 @@ function initTelemetry(serviceName) {
   process.on('SIGTERM', () => sdk.shutdown());
 }
 
-module.exports = { initTelemetry };
+/**
+ * Copy every app.* baggage entry onto the active span. Call at the entry of
+ * every gRPC handler so each span carries all attributes that exist at that
+ * point in the request flow.
+ */
+function stampAppAttrs() {
+  const api = require('@opentelemetry/api');
+  const span = api.trace.getActiveSpan();
+  const bag = api.propagation.getActiveBaggage();
+  if (!span || !bag) {
+    return;
+  }
+  for (const [key, entry] of Object.entries(bag.getAllEntries())) {
+    if (key.startsWith('app.')) {
+      span.setAttribute(key, entry.value);
+    }
+  }
+}
+
+module.exports = { initTelemetry, stampAppAttrs };

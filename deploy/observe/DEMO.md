@@ -200,3 +200,30 @@ kubectl logs deployment/loadgenerator --tail=10   # failures/s back to 0
 | `demo-fix.sh` | Restore `redis-cart:6379`, annotate deployment, rollout |
 | `demo-bad-cartservice.yaml` | **Deprecated** — full Deployment replace strips OTEL env; use `demo-break.sh` |
 | `demo-rollback-cartservice.yaml` | **Deprecated** — use `demo-fix.sh` |
+
+---
+
+## Custom Span Attributes
+
+Every microservice stamps a set of `app.*` span attributes onto its spans so traces can be sliced by business dimensions in Observe. The attributes are propagated across services via W3C Baggage, so each span carries every attribute that exists at that point in the request flow.
+
+| Attribute | Meaning | Origin |
+|-----------|---------|--------|
+| `app.session.id` | Browser session (the user identity — no login in this app) | frontend (cookie UUID) |
+| `app.request.id` | Per-HTTP-request UUID | frontend |
+| `app.currency` | User's selected currency code | frontend (cookie) |
+| `app.product.id` | Product being viewed / added | frontend route |
+| `app.product.quantity` | Quantity added to cart | frontend add-to-cart |
+| `app.cart.action` | Cart operation: `add` / `view` / `empty` / `checkout` | frontend route |
+| `app.order.id` | Order UUID | checkout (generated in PlaceOrder) |
+| `app.order.items` | Comma-joined product IDs in the order | checkout |
+| `app.payment.transaction_id` | Payment transaction UUID | paymentservice |
+| `app.payment.card_type` | `visa` / `mastercard` | paymentservice (stays on payment span only) |
+| `app.shipping.tracking_id` | Shipment tracking ID | shippingservice |
+
+**Observe queries (OPAL examples):**
+- Group spans by `app.session.id` to see all activity for one user across every service.
+- `app.cart.action = "checkout"` with `app.order.id` set = purchased; `app.cart.action = "add"` with no subsequent checkout = abandoned in cart.
+- Filter `app.product.id` to follow a product through the view → cart → checkout funnel.
+
+**Propagation note:** `OTEL_PROPAGATORS=tracecontext,baggage` is set by `patch-tracing-env.sh` so the .NET and Java runtimes (which rely on the env var) extract baggage. Go, Python, and Node services also register the Baggage propagator in code. Attributes created mid-flow (`app.order.id`, `app.payment.transaction_id`, `app.shipping.tracking_id`) only appear on spans that execute at or after they are created; `app.payment.card_type` is not returned by the payment service and so only appears on the payment span.

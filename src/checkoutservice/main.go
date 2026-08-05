@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/profiler"
@@ -228,17 +229,28 @@ func (cs *checkoutService) Watch(req *healthpb.HealthCheckRequest, ws healthpb.H
 }
 
 func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
+	stampAppAttrs(ctx)
 	log.WithContext(ctx).Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
 
 	orderID, err := uuid.NewUUID()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
+	// Inject the order id into baggage so all downstream spans in this
+	// PlaceOrder (payment, shipping, cart-empty, email) carry app.order.id.
+	ctx = withBaggage(ctx, "app.order.id", orderID.String())
 
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, err.Error())
 	}
+	// Inject the purchased product ids into baggage.
+	var purchasedIDs []string
+	for _, it := range prep.cartItems {
+		purchasedIDs = append(purchasedIDs, it.GetProductId())
+	}
+	ctx = withBaggage(ctx, "app.order.items", strings.Join(purchasedIDs, ","))
+	stampAppAttrs(ctx)
 
 	total := pb.Money{CurrencyCode: req.UserCurrency,
 		Units: 0,
@@ -254,11 +266,17 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 		return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
 	}
 	log.WithContext(ctx).Infof("payment went through (transaction_id: %s)", txID)
+	// Inject the payment transaction id into baggage so shipping/email spans
+	// carry app.payment.transaction_id.
+	ctx = withBaggage(ctx, "app.payment.transaction_id", txID)
 
 	shippingTrackingID, err := cs.shipOrder(ctx, req.Address, prep.cartItems)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
 	}
+	// Inject the shipping tracking id into baggage so the email span carries
+	// app.shipping.tracking_id.
+	ctx = withBaggage(ctx, "app.shipping.tracking_id", shippingTrackingID)
 
 	_ = cs.emptyUserCart(ctx, req.UserId)
 

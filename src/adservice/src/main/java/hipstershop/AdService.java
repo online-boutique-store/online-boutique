@@ -28,6 +28,8 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus;
 import io.grpc.services.*;
 import io.grpc.stub.StreamObserver;
+import io.opentelemetry.api.baggage.Baggage;
+import io.opentelemetry.api.trace.Span;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -93,6 +95,7 @@ public final class AdService {
      */
     @Override
     public void getAds(AdRequest req, StreamObserver<AdResponse> responseObserver) {
+      stampAppAttrs();
       AdService service = AdService.getInstance();
       try {
         List<Ad> allAds = new ArrayList<>();
@@ -138,6 +141,25 @@ public final class AdService {
 
   private static AdService getInstance() {
     return service;
+  }
+
+  /**
+   * Copies every app.* baggage entry onto the current span. Call at the entry of
+   * every gRPC handler so each span carries all attributes that exist at that
+   * point in the request flow. The Java agent provides the OTel API at runtime.
+   */
+  private static void stampAppAttrs() {
+    Span span = Span.current();
+    if (!span.getSpanContext().isValid()) {
+      return;
+    }
+    Baggage baggage = Baggage.current();
+    baggage.forEach(
+        (key, entry) -> {
+          if (key.startsWith("app.")) {
+            span.setAttribute(key, entry.getValue());
+          }
+        });
   }
 
   /** Await termination on the main thread since the grpc library uses daemon threads. */

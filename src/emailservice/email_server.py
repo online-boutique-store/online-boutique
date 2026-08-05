@@ -33,6 +33,8 @@ from grpc_health.v1 import health_pb2_grpc
 import googlecloudprofiler
 
 from logger import getJSONLogger
+
+from otel_setup import stamp_app_attrs
 logger = getJSONLogger('emailservice-server')
 
 # Loads confirmation email template from file
@@ -77,6 +79,7 @@ class EmailService(BaseEmailService):
     logger.info("Message sent: {}".format(response.rfc822_message_id))
 
   def SendOrderConfirmation(self, request, context):
+    stamp_app_attrs()
     email = request.email
     order = request.order
 
@@ -100,6 +103,7 @@ class EmailService(BaseEmailService):
 
 class DummyEmailService(BaseEmailService):
   def SendOrderConfirmation(self, request, context):
+    stamp_app_attrs()
     logger.info('A request to send order confirmation email to {} has been received.'.format(request.email))
     return demo_pb2.Empty()
 

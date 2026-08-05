@@ -76,13 +76,14 @@ if [[ "${SKIP_BUILD}" == "false" ]]; then
   done
 fi
 
-echo "==> Applying Kubernetes manifests..."
-KUSTOM_FILE="${ROOT}/deploy/aws/kustomization.yaml"
-KUSTOM_BAK="${ROOT}/deploy/aws/kustomization.yaml.bak"
-cp "${KUSTOM_FILE}" "${KUSTOM_BAK}"
-sed -i '' "s|ECR_URI_PLACEHOLDER|${ECR_URI}|g" "${KUSTOM_FILE}"
-kubectl apply -k "${ROOT}/deploy/aws"
-mv "${KUSTOM_BAK}" "${KUSTOM_FILE}"
+APPLY_TARGET="${ROOT}/deploy/observe"
+echo "==> Applying Kubernetes manifests (deploy/observe — app + OTEL instrumentation)."
+echo "    Telemetry goes to the Observe Kubernetes agent forwarder; install the"
+echo "    agent from the Observe UI (before or after this run) if you haven't."
+echo "    (Deploy app only, no OTEL env vars: kubectl apply -k deploy/aws)"
+# Render then substitute in the pipe (never touch kustomization.yaml on disk) —
+# safe even if the script is killed mid-run.
+kubectl kustomize "${APPLY_TARGET}" | sed "s|ECR_URI_PLACEHOLDER|${ECR_URI}|g" | kubectl apply -f -
 
 echo "==> Waiting for deployments..."
 kubectl rollout status deployment/frontend --timeout=300s

@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED for fresh deploys: use `kubectl apply -k deploy/observe` instead,
+# which bakes this same env wiring into the manifests so it can't be lost on
+# the next plain `kubectl apply`. This script mutates a *running* cluster
+# imperatively and is kept only for clusters already bootstrapped the old way.
+# See deploy/observe/README.md.
+#
 # Patch Online Boutique deployments with Observe/OpenTelemetry env vars.
 # Enables trace + pod log correlation fields and k8s identity on trace resources.
 #
@@ -62,6 +68,7 @@ patch_service() {
     OTEL_SERVICE_NAME="${svc}" \
     OTEL_EXPORTER_OTLP_ENDPOINT="${COLLECTOR_OTLP}" \
     OTEL_EXPORTER_OTLP_PROTOCOL=grpc \
+    OTEL_PROPAGATORS=tracecontext,baggage \
     OTEL_TRACES_EXPORTER=otlp \
     OTEL_METRICS_EXPORTER=otlp \
     OTEL_LOGS_EXPORTER=otlp \

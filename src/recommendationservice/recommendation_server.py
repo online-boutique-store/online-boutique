@@ -32,6 +32,8 @@ from grpc_health.v1 import health_pb2_grpc
 from logger import getJSONLogger
 logger = getJSONLogger('recommendationservice-server')
 
+from otel_setup import stamp_app_attrs
+
 def initStackdriverProfiling():
   project_id = None
   try:
@@ -59,6 +61,7 @@ def initStackdriverProfiling():
 
 class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
     def ListRecommendations(self, request, context):
+        stamp_app_attrs()
         max_responses = 5
         # fetch list of products from product catalog stub
         cat_response = product_catalog_stub.ListProducts(demo_pb2.Empty())

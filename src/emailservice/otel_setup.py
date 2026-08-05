@@ -1,15 +1,36 @@
 import os
 
+import opentelemetry.baggage as baggage_api
 import opentelemetry.metrics as metrics_api
 import opentelemetry.trace as trace_api
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient, GrpcInstrumentorServer
+from opentelemetry.propagate import set_global_textmap
+from opentelemetry.propagators.composite import CompositePropagator
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import OTELResourceDetector, Resource, get_aggregated_resources
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+try:
+    from opentelemetry.baggage.propagation import W3CBaggagePropagator
+except ImportError:  # pragma: no cover - older versions
+    from opentelemetry.propagators.baggage import W3CBaggagePropagator
+
+
+def stamp_app_attrs():
+    """Copy every app.* baggage entry onto the current span.
+
+    Call at the entry of every gRPC handler so each span carries all
+    attributes that exist at that point in the request flow.
+    """
+    span = trace_api.get_current_span()
+    for key, value in baggage_api.get_all().items():
+        if key.startswith("app."):
+            span.set_attribute(key, value)
 
 
 def _endpoint():
@@ -54,6 +75,11 @@ def init_opentelemetry(*, instrument_client=False):
         BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True))
     )
     trace_api.set_tracer_provider(trace_provider)
+    # Enable W3C Baggage propagation so app.* attributes injected upstream
+    # (e.g. app.session.id from the frontend) reach these spans.
+    set_global_textmap(
+        CompositePropagator([TraceContextTextMapPropagator(), W3CBaggagePropagator()])
+    )
     GrpcInstrumentorServer().instrument()
     if instrument_client:
         GrpcInstrumentorClient().instrument()

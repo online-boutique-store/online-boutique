@@ -26,3 +26,10 @@ obj/
 pkg/
 release/wi-kubernetes-manifests.yaml
 vendor/
+
+# Real Observe ingest credentials for deploy/observe (secretGenerator input).
+# Never commit this — copy observe-credentials.env.example instead.
+deploy/observe/observe-credentials.env
+
+# Cortex Code IDE files
+.snowflake/

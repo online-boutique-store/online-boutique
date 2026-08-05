@@ -35,10 +35,12 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -114,6 +116,7 @@ func (s *server) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Health_Watc
 
 // GetQuote produces a shipping quote (cost) in USD.
 func (s *server) GetQuote(ctx context.Context, in *pb.GetQuoteRequest) (*pb.GetQuoteResponse, error) {
+	stampAppAttrs(ctx)
 	log.WithContext(ctx).Info("[GetQuote] received request")
 	defer log.WithContext(ctx).Info("[GetQuote] completed request")
 
@@ -133,13 +136,19 @@ func (s *server) GetQuote(ctx context.Context, in *pb.GetQuoteRequest) (*pb.GetQ
 // ShipOrder mocks that the requested items will be shipped.
 // It supplies a tracking ID for notional lookup of shipment delivery status.
 func (s *server) ShipOrder(ctx context.Context, in *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
+	stampAppAttrs(ctx)
 	log.WithContext(ctx).Info("[ShipOrder] received request")
 	defer log.WithContext(ctx).Info("[ShipOrder] completed request")
 	// 1. Create a Tracking ID
 	baseAddress := fmt.Sprintf("%s, %s, %s", in.Address.StreetAddress, in.Address.City, in.Address.State)
 	id := CreateTrackingId(baseAddress)
 
-	// 2. Generate a response.
+	// 2. Stamp the tracking id onto this span as an originating attribute.
+	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+		span.SetAttributes(attribute.String("app.shipping.tracking_id", id))
+	}
+
+	// 3. Generate a response.
 	return &pb.ShipOrderResponse{
 		TrackingId: id,
 	}, nil

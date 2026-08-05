@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED for fresh deploys: use `kubectl apply -k deploy/observe` instead
+# — it applies the collector AND instruments every service in one declarative
+# step, rather than deploying plain manifests and patching them afterward.
+# Kept only for clusters already bootstrapped the old way. See
+# deploy/observe/README.md.
+#
 # Wire Observe telemetry on a fresh EKS cluster after deploy/aws/deploy.sh.
 #
 # Uses the standalone OTEL collector in this repo (same Observe ingest token as before).

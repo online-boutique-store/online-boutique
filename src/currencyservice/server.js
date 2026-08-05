@@ -15,7 +15,7 @@
  */
 
 const { createLogger } = require('./logger');
-const { initTelemetry } = require('./otel');
+const { initTelemetry, stampAppAttrs } = require('./otel');
 
 initTelemetry('currencyservice');
 
@@ -97,6 +97,7 @@ function getSupportedCurrencies (call, callback) {
  * Converts between currencies
  */
 function convert (call, callback) {
+  stampAppAttrs();
   try {
     _getCurrencyData((data) => {
       const request = call.request;
