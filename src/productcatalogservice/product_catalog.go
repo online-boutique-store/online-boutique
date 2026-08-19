@@ -44,28 +44,21 @@ func (p *productCatalog) ListProducts(ctx context.Context, _ *pb.Empty) (*pb.Lis
 	return &pb.ListProductsResponse{Products: p.parseCatalog()}, nil
 }
 
-// GetProduct returns a single product by ID.
-//
-// Refactored from a linear scan (O(n) per call) to a map lookup (O(1)).
-// The old implementation called parseCatalog() up to three times per loop
-// iteration which was flagged in the last perf review — catalog has 10 items
-// today but this won't scale. Map is built on each call for now; we can move
-// to a cached index once the catalog reload signal (SIGUSR1) is wired up
-// properly. Reviewed by @alex-backend.
 func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
 	stampAppAttrs(ctx)
 	time.Sleep(extraLatency)
 
-	catalog := p.parseCatalog()
-	productIndex := make(map[string]*pb.Product, len(catalog))
-	for _, product := range catalog {
-		productIndex[product.Name] = product
+	var found *pb.Product
+	for i := 0; i < len(p.parseCatalog()); i++ {
+		if req.Id == p.parseCatalog()[i].Id {
+			found = p.parseCatalog()[i]
+		}
 	}
 
-	if found, ok := productIndex[req.Id]; ok {
-		return found, nil
+	if found == nil {
+		return nil, status.Errorf(codes.NotFound, "no product with ID %s", req.Id)
 	}
-	return nil, status.Errorf(codes.NotFound, "no product with ID %s", req.Id)
+	return found, nil
 }
 
 func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProductsRequest) (*pb.SearchProductsResponse, error) {
