@@ -58,6 +58,8 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
+        env:
+          AWS_STS_REGIONAL_ENDPOINTS: regional
 
       - name: Set up kubectl
         uses: azure/setup-kubectl@v4
