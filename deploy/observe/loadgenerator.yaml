@@ -1,0 +1,100 @@
+# Locust load generator — simulates realistic shopping traffic against the frontend.
+# Hits browse, cart, checkout, currency change, etc. (see src/loadgenerator/locustfile.py).
+#
+# Deploy:
+#   ./deploy/observe/deploy-loadgenerator.sh
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loadgenerator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgenerator
+  labels:
+    app: loadgenerator
+spec:
+  selector:
+    matchLabels:
+      app: loadgenerator
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: loadgenerator
+    spec:
+      serviceAccountName: loadgenerator
+      terminationGracePeriodSeconds: 5
+      restartPolicy: Always
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+      - name: frontend-check
+        image: busybox:1.36
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        env:
+        - name: FRONTEND_ADDR
+          value: "frontend:80"
+        command:
+        - /bin/sh
+        - -exc
+        - |
+          MAX_RETRIES=30
+          RETRY_INTERVAL=10
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i: checking http://${FRONTEND_ADDR}/_healthz..."
+            STATUSCODE=$(wget --server-response "http://${FRONTEND_ADDR}/_healthz" 2>&1 | awk '/^  HTTP/{print $2}')
+            if [ "$STATUSCODE" = "200" ]; then
+              echo "Frontend is reachable."
+              exit 0
+            fi
+            echo "Frontend not ready (status=${STATUSCODE:-none})"
+            sleep $RETRY_INTERVAL
+          done
+          echo "Frontend unreachable after ${MAX_RETRIES} attempts."
+          exit 1
+      containers:
+      - name: main
+        image: IMAGE_PLACEHOLDER
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        env:
+        - name: FRONTEND_ADDR
+          value: "frontend:80"
+        # Concurrent simulated users (keep low on small clusters)
+        - name: USERS
+          value: "USERS_PLACEHOLDER"
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        # Override entrypoint to tune spawn rate without rebuilding the image
+        command:
+        - locust
+        args:
+        - --host=http://frontend:80
+        - --headless
+        - -u
+        - "USERS_PLACEHOLDER"
+        - -r
+        - "SPAWN_RATE_PLACEHOLDER"
+        - --print-stats

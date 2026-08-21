@@ -17,6 +17,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Grpc.Core;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Logging;
 using Google.Protobuf;
 
 namespace cartservice.cartstore
@@ -24,15 +25,19 @@ namespace cartservice.cartstore
     public class RedisCartStore : ICartStore
     {
         private readonly IDistributedCache _cache;
+        private readonly ILogger<RedisCartStore> _logger;
 
-        public RedisCartStore(IDistributedCache cache)
+        public RedisCartStore(IDistributedCache cache, ILogger<RedisCartStore> logger)
         {
             _cache = cache;
+            _logger = logger;
         }
 
         public async Task AddItemAsync(string userId, string productId, int quantity)
         {
-            Console.WriteLine($"AddItemAsync called with userId={userId}, productId={productId}, quantity={quantity}");
+            _logger.LogInformation(
+                "AddItemAsync called with userId={UserId}, productId={ProductId}, quantity={Quantity}",
+                userId, productId, quantity);
 
             try
             {
@@ -61,13 +66,16 @@ namespace cartservice.cartstore
             }
             catch (Exception ex)
             {
+                _logger.LogError(ex,
+                    "Redis cart storage failed for userId={UserId}, operation=AddItem, redis={RedisHost}",
+                    userId, Environment.GetEnvironmentVariable("REDIS_ADDR"));
                 throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
             }
         }
 
         public async Task EmptyCartAsync(string userId)
         {
-            Console.WriteLine($"EmptyCartAsync called with userId={userId}");
+            _logger.LogInformation("EmptyCartAsync called with userId={UserId}", userId);
 
             try
             {
@@ -76,13 +84,16 @@ namespace cartservice.cartstore
             }
             catch (Exception ex)
             {
+                _logger.LogError(ex,
+                    "Redis cart storage failed for userId={UserId}, operation=EmptyCart, redis={RedisHost}",
+                    userId, Environment.GetEnvironmentVariable("REDIS_ADDR"));
                 throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
             }
         }
 
         public async Task<Hipstershop.Cart> GetCartAsync(string userId)
         {
-            Console.WriteLine($"GetCartAsync called with userId={userId}");
+            _logger.LogInformation("GetCartAsync called with userId={UserId}", userId);
 
             try
             {
@@ -99,6 +110,9 @@ namespace cartservice.cartstore
             }
             catch (Exception ex)
             {
+                _logger.LogError(ex,
+                    "Redis cart storage failed for userId={UserId}, operation=GetCart, redis={RedisHost}",
+                    userId, Environment.GetEnvironmentVariable("REDIS_ADDR"));
                 throw new RpcException(new Status(StatusCode.FailedPrecondition, $"Can't access cart storage. {ex}"));
             }
         }

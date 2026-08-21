@@ -1,0 +1,92 @@
+name: Docker Builds
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Build twice a day to catch problems introduced by upstream base image changes
+    - cron: '0 6,18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Image builds ─────────────────────────────────────────────────────────────
+  # Builds one representative service per language to verify all Dockerfiles
+  # remain functional. Images are built locally and never pushed to a registry.
+  #
+  # Service selection (one per language):
+  #   frontend          – Go
+  #   emailservice      – Python
+  #   currencyservice   – Node.js
+  #   adservice         – Java (Gradle)
+  #   cartservice       – .NET 8  (Dockerfile in src/cartservice/src/)
+  build:
+    name: ${{ matrix.service }} (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: frontend
+            language: Go
+            context: src/frontend
+          - service: emailservice
+            language: Python
+            context: src/emailservice
+          - service: currencyservice
+            language: Node.js
+            context: src/currencyservice
+          - service: adservice
+            language: Java
+            context: src/adservice
+          - service: cartservice
+            language: .NET
+            context: src/cartservice/src
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # BuildKit enables layer-level parallelism and advanced cache export.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Cache Docker layers between runs. Each service gets its own cache namespace.
+      # The restore-keys fallback lets a new sha still benefit from the previous run's layers.
+      - name: Restore Docker layer cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache-${{ matrix.service }}
+          key: ${{ runner.os }}-buildx-${{ matrix.service }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.service }}-
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          tags: ${{ matrix.service }}:ci
+          # Load into the local Docker daemon so subsequent steps can inspect it
+          load: true
+          cache-from: type=local,src=/tmp/.buildx-cache-${{ matrix.service }}
+          cache-to: type=local,dest=/tmp/.buildx-cache-${{ matrix.service }}-new,mode=max
+
+      # Prevent the cache directory from growing unboundedly across runs
+      - name: Rotate cache
+        run: |
+          rm -rf /tmp/.buildx-cache-${{ matrix.service }}
+          mv /tmp/.buildx-cache-${{ matrix.service }}-new \
+             /tmp/.buildx-cache-${{ matrix.service }}
+
+      # Confirm the image was actually created
+      - name: Verify image exists
+        run: docker image inspect ${{ matrix.service }}:ci --format '{{.Id}}'

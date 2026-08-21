@@ -14,17 +14,10 @@
 
 const cardValidator = require('simple-card-validator');
 const { v4: uuidv4 } = require('uuid');
-const pino = require('pino');
+const { createLogger } = require('./logger');
+const { stampAppAttrs } = require('./otel');
 
-const logger = pino({
-  name: 'paymentservice-charge',
-  messageKey: 'message',
-  formatters: {
-    level (logLevelString, logLevelNum) {
-      return { severity: logLevelString }
-    }
-  }
-});
+const logger = createLogger('paymentservice-charge');
 
 
 class CreditCardError extends Error {
@@ -59,6 +52,7 @@ class ExpiredCreditCard extends CreditCardError {
  * @return transaction_id - a random uuid.
  */
 module.exports = function charge (request) {
+  stampAppAttrs();
   const { amount, credit_card: creditCard } = request;
   const cardNumber = creditCard.credit_card_number;
   const cardInfo = cardValidator(cardNumber);
@@ -82,5 +76,16 @@ module.exports = function charge (request) {
   logger.info(`Transaction processed: ${cardType} ending ${cardNumber.substr(-4)} \
     Amount: ${amount.currency_code}${amount.units}.${amount.nanos}`);
 
-  return { transaction_id: uuidv4() };
+  const transaction_id = uuidv4();
+  // Stamp the originating payment attributes onto this span. card_type is
+  // not returned to checkout, so it only lives here; transaction_id is
+  // returned and checkout re-injects it into baggage for downstream spans.
+  const api = require('@opentelemetry/api');
+  const span = api.trace.getActiveSpan();
+  if (span) {
+    span.setAttribute('app.payment.transaction_id', transaction_id);
+    span.setAttribute('app.payment.card_type', cardType);
+  }
+
+  return { transaction_id };
 };

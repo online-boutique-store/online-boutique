@@ -14,13 +14,43 @@
 
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using cartservice;
 
 CreateHostBuilder(args).Build().Run();
 
 static IHostBuilder CreateHostBuilder(string[] args) =>
     Host.CreateDefaultBuilder(args)
+        .ConfigureLogging((_, logging) =>
+        {
+            logging.ClearProviders();
+            logging.SetMinimumLevel(LogLevel.Information);
+
+            if (ShouldExportOtlpLogs())
+            {
+                logging.AddOpenTelemetry(options =>
+                {
+                    options.IncludeFormattedMessage = true;
+                    options.IncludeScopes = true;
+                    options.ParseStateValues = true;
+                });
+            }
+            else
+            {
+                logging.AddConsole();
+            }
+        })
         .ConfigureWebHostDefaults(webBuilder =>
         {
             webBuilder.UseStartup<Startup>();
         });
+
+static bool ShouldExportOtlpLogs() =>
+    string.Equals(
+        System.Environment.GetEnvironmentVariable("ENABLE_TRACING"),
+        "1",
+        System.StringComparison.Ordinal)
+    && string.Equals(
+        System.Environment.GetEnvironmentVariable("OTEL_LOGS_EXPORTER"),
+        "otlp",
+        System.StringComparison.OrdinalIgnoreCase);

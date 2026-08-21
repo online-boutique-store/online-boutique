@@ -18,7 +18,8 @@ const protoLoader = require('@grpc/proto-loader');
 
 const charge = require('./charge');
 
-const logger = require('./logger')
+const { createLogger } = require('./logger');
+const logger = createLogger('paymentservice-server');
 
 class HipsterShopServer {
   constructor(protoRoot, port = HipsterShopServer.PORT) {

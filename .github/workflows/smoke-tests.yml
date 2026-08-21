@@ -1,0 +1,130 @@
+name: Smoke Tests
+
+on:
+  schedule:
+    # Run every 15 minutes to detect availability issues quickly
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+# Allow at most one smoke test run at a time; do not cancel in-progress runs
+# (let the current one finish so we don't lose a failure signal).
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke test – ${{ vars.ENVIRONMENT_NAME || 'default' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      # Set FRONTEND_URL as a repository secret or variable.
+      # Example: http://a1b2c3.us-east-1.elb.amazonaws.com
+      FRONTEND_URL: ${{ secrets.FRONTEND_URL || 'http://a181aaa9fa0594ec68a7a1f803f99586-1700447454.us-west-2.elb.amazonaws.com' }}
+      # Maximum seconds to wait for a single request before declaring a timeout
+      REQUEST_TIMEOUT: 15
+      # Number of times to retry a failing request before reporting a failure
+      MAX_RETRIES: 3
+      # Seconds to wait between retries
+      RETRY_DELAY: 5
+
+    steps:
+      - name: Print target URL
+        run: echo "Target: ${FRONTEND_URL}"
+
+      # ── Step 1: health endpoint ─────────────────────────────────────────────
+      # The frontend exposes /_healthz which returns 200 when the service is up.
+      - name: Health check
+        run: |
+          for i in $(seq 1 ${MAX_RETRIES}); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time "${REQUEST_TIMEOUT}" \
+              "${FRONTEND_URL}/_healthz" || echo "000")
+            echo "Attempt ${i}: /_healthz → HTTP ${status}"
+            if [ "${status}" = "200" ]; then
+              echo "Health check passed."
+              exit 0
+            fi
+            if [ "${i}" -lt "${MAX_RETRIES}" ]; then
+              sleep "${RETRY_DELAY}"
+            fi
+          done
+          echo "::error::/_healthz did not return 200 after ${MAX_RETRIES} attempts."
+          exit 1
+
+      # ── Step 2: homepage ────────────────────────────────────────────────────
+      # Verifies the storefront HTML renders successfully.
+      - name: Homepage loads
+        run: |
+          for i in $(seq 1 ${MAX_RETRIES}); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time "${REQUEST_TIMEOUT}" \
+              "${FRONTEND_URL}/" || echo "000")
+            echo "Attempt ${i}: / → HTTP ${status}"
+            if [ "${status}" = "200" ]; then
+              echo "Homepage check passed."
+              exit 0
+            fi
+            if [ "${i}" -lt "${MAX_RETRIES}" ]; then
+              sleep "${RETRY_DELAY}"
+            fi
+          done
+          echo "::error::Homepage did not return 200 after ${MAX_RETRIES} attempts."
+          exit 1
+
+      # ── Step 3: product page ────────────────────────────────────────────────
+      # Exercises the product catalog and recommendation services by fetching a
+      # known product (Sunglasses, SKU 0PUK6V6EV0).
+      - name: Product page loads
+        run: |
+          for i in $(seq 1 ${MAX_RETRIES}); do
+            response=$(curl -s -w "\n%{http_code}" \
+              --max-time "${REQUEST_TIMEOUT}" \
+              "${FRONTEND_URL}/product/0PUK6V6EV0" || echo -e "\n000")
+            status=$(echo "${response}" | tail -1)
+            echo "Attempt ${i}: /product/0PUK6V6EV0 → HTTP ${status}"
+            if [ "${status}" = "200" ]; then
+              # Verify the response contains product content (not an error page)
+              body=$(echo "${response}" | head -n -1)
+              if echo "${body}" | grep -qi "add to cart"; then
+                echo "Product page check passed."
+                exit 0
+              else
+                echo "::warning::Product page returned 200 but expected content not found."
+                exit 1
+              fi
+            fi
+            if [ "${i}" -lt "${MAX_RETRIES}" ]; then
+              sleep "${RETRY_DELAY}"
+            fi
+          done
+          echo "::error::Product page did not return 200 after ${MAX_RETRIES} attempts."
+          exit 1
+
+      # ── Step 4: cart endpoint ───────────────────────────────────────────────
+      # Verifies the cart service is reachable by fetching an (empty) cart page.
+      - name: Cart page loads
+        run: |
+          for i in $(seq 1 ${MAX_RETRIES}); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time "${REQUEST_TIMEOUT}" \
+              "${FRONTEND_URL}/cart" || echo "000")
+            echo "Attempt ${i}: /cart → HTTP ${status}"
+            if [ "${status}" = "200" ]; then
+              echo "Cart check passed."
+              exit 0
+            fi
+            if [ "${i}" -lt "${MAX_RETRIES}" ]; then
+              sleep "${RETRY_DELAY}"
+            fi
+          done
+          echo "::error::/cart did not return 200 after ${MAX_RETRIES} attempts."
+          exit 1
+
+      # ── Summary ────────────────────────────────────────────────────────────
+      - name: Report pass
+        run: echo "All smoke test checks passed for ${FRONTEND_URL}"

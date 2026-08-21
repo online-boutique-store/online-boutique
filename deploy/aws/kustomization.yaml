@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../kubernetes-manifests
+images:
+  - name: adservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: adservice
+  - name: cartservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: cartservice
+  - name: checkoutservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: checkoutservice
+  - name: currencyservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: currencyservice
+  - name: emailservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: emailservice
+  - name: frontend
+    newName: ECR_URI_PLACEHOLDER
+    newTag: frontend
+  - name: paymentservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: paymentservice
+  - name: productcatalogservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: productcatalogservice
+  - name: recommendationservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: recommendationservice
+  - name: shippingservice
+    newName: ECR_URI_PLACEHOLDER
+    newTag: shippingservice

@@ -65,7 +65,7 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"http.req.path":   r.URL.Path,
 		"http.req.method": r.Method,
 		"http.req.id":     requestID.String(),
-	})
+	}).WithContext(ctx)
 	if v, ok := r.Context().Value(ctxKeySessionID{}).(string); ok {
 		log = log.WithField("session", v)
 	}
@@ -76,6 +76,16 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"http.resp.status":  rr.status,
 			"http.resp.bytes":   rr.b}).Debugf("request complete")
 	}()
+
+	// Seed cross-cutting app.* attributes into W3C baggage so every downstream
+	// gRPC span in this request inherits them. session_id comes from
+	// ensureSessionID (which ran before this handler); currency from the cookie.
+	if sid, ok := ctx.Value(ctxKeySessionID{}).(string); ok {
+		ctx = withBaggage(ctx, "app.session.id", sid)
+	}
+	ctx = withBaggage(ctx, "app.request.id", requestID.String())
+	ctx = withBaggage(ctx, "app.currency", currentCurrency(r))
+	stampAppAttrs(ctx)
 
 	ctx = context.WithValue(ctx, ctxKeyLog{}, log)
 	r = r.WithContext(ctx)

@@ -33,17 +33,20 @@ namespace cartservice.services
 
         public async override Task<Empty> AddItem(AddItemRequest request, ServerCallContext context)
         {
+            OtelAttrs.StampAppAttrs();
             await _cartStore.AddItemAsync(request.UserId, request.Item.ProductId, request.Item.Quantity);
             return Empty;
         }
 
         public override Task<Cart> GetCart(GetCartRequest request, ServerCallContext context)
         {
+            OtelAttrs.StampAppAttrs();
             return _cartStore.GetCartAsync(request.UserId);
         }
 
         public async override Task<Empty> EmptyCart(EmptyCartRequest request, ServerCallContext context)
         {
+            OtelAttrs.StampAppAttrs();
             await _cartStore.EmptyCartAsync(request.UserId);
             return Empty;
         }

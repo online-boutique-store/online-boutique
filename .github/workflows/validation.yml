@@ -1,0 +1,154 @@
+name: Configuration Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Run every 6 hours to catch drift between config files and tool versions
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Kubernetes manifests ──────────────────────────────────────────────────────
+  # Validates raw YAML manifests in kubernetes-manifests/ using kubectl dry-run.
+  # Catches malformed resource definitions without requiring a live cluster.
+  validate-kubernetes:
+    name: Kubernetes manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Validate manifests (dry-run)
+        run: |
+          kubectl apply \
+            --dry-run=client \
+            --validate=true \
+            -f kubernetes-manifests/ \
+            --recursive
+
+  # ── Helm chart ───────────────────────────────────────────────────────────────
+  # Runs `helm lint` and spot-checks a few template renderings from helm-chart/.
+  validate-helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart with default values
+        run: helm lint helm-chart/
+
+      - name: Render templates (spot-check)
+        # Verifies templates render without errors under a few flag combinations
+        run: |
+          helm template online-boutique helm-chart/ > /dev/null
+          helm template online-boutique helm-chart/ \
+            --set serviceAccounts.create=false > /dev/null
+
+  # ── Kustomize overlays ────────────────────────────────────────────────────────
+  # Builds the base kustomize overlay to confirm all references resolve.
+  validate-kustomize:
+    name: Kustomize overlays
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl (includes kustomize)
+        uses: azure/setup-kubectl@v4
+
+      - name: Build base overlay
+        run: kubectl kustomize kustomize/ > /dev/null
+
+      # Build the AWS overlay if it exists
+      - name: Build AWS overlay
+        run: |
+          if [ -f deploy/aws/kustomization.yaml ]; then
+            kubectl kustomize deploy/aws/ > /dev/null
+          fi
+
+  # ── Terraform ────────────────────────────────────────────────────────────────
+  # Checks formatting and runs `terraform validate` without a backend.
+  validate-terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # fmt -check exits non-zero if any file is not formatted correctly
+      - name: Check formatting
+        run: terraform -chdir=terraform fmt -check -recursive
+
+      - name: Initialize (no backend)
+        run: terraform -chdir=terraform init -backend=false
+
+      - name: Validate configuration
+        run: terraform -chdir=terraform validate
+
+  # ── YAML syntax ──────────────────────────────────────────────────────────────
+  # Runs yamllint over the key config directories.
+  validate-yaml:
+    name: YAML syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install --quiet yamllint
+
+      # Use relaxed rules: allow long lines and both quote styles,
+      # but catch structural errors (duplicate keys, bad indentation).
+      - name: Lint YAML files
+        run: |
+          yamllint \
+            --config-data '{extends: relaxed, rules: {line-length: disable}}' \
+            kubernetes-manifests/ \
+            helm-chart/templates/ \
+            kustomize/ \
+            .github/workflows/
+
+  # ── Skaffold config ───────────────────────────────────────────────────────────
+  # Parses skaffold.yaml as YAML and validates the top-level structure.
+  validate-skaffold:
+    name: Skaffold config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install skaffold
+        run: |
+          curl -sLo skaffold \
+            https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
+          chmod +x skaffold
+          sudo mv skaffold /usr/local/bin/skaffold
+
+      # `skaffold config list` parses the config without a cluster connection
+      - name: Validate skaffold.yaml syntax
+        run: skaffold config list

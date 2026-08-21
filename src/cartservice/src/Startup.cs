@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Hosting;
@@ -10,6 +11,7 @@ using Microsoft.Extensions.Hosting;
 using cartservice.cartstore;
 using cartservice.services;
 using Microsoft.Extensions.Caching.StackExchangeRedis;
+using StackExchange.Redis;
 
 namespace cartservice
 {
@@ -33,10 +35,19 @@ namespace cartservice
 
             if (!string.IsNullOrEmpty(redisAddress))
             {
-                services.AddStackExchangeRedisCache(options =>
-                {
-                    options.Configuration = redisAddress;
-                });
+                var redisConfig = ConfigurationOptions.Parse(redisAddress);
+                redisConfig.AbortOnConnectFail = false;
+
+                services.AddSingleton<IConnectionMultiplexer>(_ =>
+                    ConnectionMultiplexer.Connect(redisConfig));
+
+                services.AddStackExchangeRedisCache(_ => { });
+                services.AddOptions<RedisCacheOptions>()
+                    .Configure<IConnectionMultiplexer>((options, multiplexer) =>
+                    {
+                        options.ConnectionMultiplexerFactory = () => Task.FromResult(multiplexer);
+                    });
+
                 services.AddSingleton<ICartStore, RedisCartStore>();
             }
             else if (!string.IsNullOrEmpty(spannerProjectId) || !string.IsNullOrEmpty(spannerConnectionString))
@@ -55,6 +66,8 @@ namespace cartservice
                 services.AddSingleton<ICartStore, RedisCartStore>();
             }
 
+            // Register OTEL after Redis so Redis instrumentation can resolve IConnectionMultiplexer.
+            services.AddAppTelemetry(Configuration);
 
             services.AddGrpc();
         }

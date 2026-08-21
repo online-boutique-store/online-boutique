@@ -151,6 +151,11 @@ func (fe *frontendServer) productHandler(w http.ResponseWriter, r *http.Request)
 	log.WithField("id", id).WithField("currency", currentCurrency(r)).
 		Debug("serving product page")
 
+	// Seed app.product.id into baggage so downstream productcatalog /
+	// recommendation spans carry it.
+	r = r.WithContext(withBaggage(r.Context(), "app.product.id", id))
+	stampAppAttrs(r.Context())
+
 	p, err := fe.getProduct(r.Context(), id)
 	if err != nil {
 		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve product"), http.StatusInternalServerError)
@@ -222,6 +227,14 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 	}
 	log.WithField("product", payload.ProductID).WithField("quantity", payload.Quantity).Debug("adding to cart")
 
+	// Seed the cart operation + product attributes into baggage so downstream
+	// cart / recommendation spans carry them.
+	ctx := withBaggage(r.Context(), "app.product.id", payload.ProductID)
+	ctx = withBaggage(ctx, "app.product.quantity", strconv.FormatUint(payload.Quantity, 10))
+	ctx = withBaggage(ctx, "app.cart.action", "add")
+	r = r.WithContext(ctx)
+	stampAppAttrs(ctx)
+
 	p, err := fe.getProduct(r.Context(), payload.ProductID)
 	if err != nil {
 		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve product"), http.StatusInternalServerError)
@@ -240,6 +253,9 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("emptying cart")
 
+	r = r.WithContext(withBaggage(r.Context(), "app.cart.action", "empty"))
+	stampAppAttrs(r.Context())
+
 	if err := fe.emptyCart(r.Context(), sessionID(r)); err != nil {
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to empty cart"), http.StatusInternalServerError)
 		return
@@ -251,6 +267,10 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("view user cart")
+
+	r = r.WithContext(withBaggage(r.Context(), "app.cart.action", "view"))
+	stampAppAttrs(r.Context())
+
 	currencies, err := fe.getCurrencies(r.Context())
 	if err != nil {
 		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve currencies"), http.StatusInternalServerError)
@@ -351,6 +371,12 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Seed the cart operation into baggage so checkout and all downstream
+	// spans (payment, shipping, email) carry app.cart.action=checkout.
+	ctx := withBaggage(r.Context(), "app.cart.action", "checkout")
+	r = r.WithContext(ctx)
+	stampAppAttrs(ctx)
+
 	order, err := pb.NewCheckoutServiceClient(fe.checkoutSvcConn).
 		PlaceOrder(r.Context(), &pb.PlaceOrderRequest{
 			Email: payload.Email,
@@ -374,7 +400,19 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 	}
 	log.WithField("order", order.GetOrder().GetOrderId()).Info("order placed")
 
-	order.GetOrder().GetItems()
+	// Backfill the order result attributes onto the root frontend span and into
+	// baggage so the trailing getRecommendations call carries them. Note
+	// transaction_id / card_type are not part of OrderResult so they stay on
+	// the checkout sub-flow spans only.
+	r = r.WithContext(withBaggage(r.Context(), "app.order.id", order.GetOrder().GetOrderId()))
+	r = r.WithContext(withBaggage(r.Context(), "app.shipping.tracking_id", order.GetOrder().GetShippingTrackingId()))
+	var purchasedIDs []string
+	for _, v := range order.GetOrder().GetItems() {
+		purchasedIDs = append(purchasedIDs, v.GetItem().GetProductId())
+	}
+	r = r.WithContext(withBaggageSlice(r.Context(), "app.order.items", purchasedIDs))
+	stampAppAttrs(r.Context())
+
 	recommendations, _ := fe.getRecommendations(r.Context(), sessionID(r), nil)
 
 	totalPaid := *order.GetOrder().GetShippingCost()

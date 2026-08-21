@@ -1,0 +1,74 @@
+# DEMO: Simulates a bad deployment of cartservice pointing at a nonexistent Redis endpoint.
+#
+# PREFERRED (preserves OTEL / log-correlation env vars):
+#   ./deploy/observe/demo-break.sh
+#
+# Legacy full-replacement manifest — DO NOT USE if cartservice has been patched
+# with patch-tracing-env.sh; it strips OTEL env vars. Kept for reference only.
+#
+# BREAK:   kubectl apply -f deploy/observe/demo-bad-cartservice.yaml
+# FIX:     kubectl apply -f deploy/observe/demo-rollback-cartservice.yaml
+#
+# What happens:
+#   - cartservice pods restart with REDIS_ADDR pointing at a nonexistent host
+#   - Redis connection errors surface in cartservice logs
+#   - Spans for AddItem / GetCart fail, error rate spikes in Observe APM
+#   - frontend and checkoutservice show cascading errors as cartservice becomes unavailable
+#   - A deployment marker appears in Observe at the moment of apply
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cartservice
+  labels:
+    app: cartservice
+  annotations:
+    deployment.version: "v2-broken"
+    deployment.change: "misconfigured REDIS_ADDR — points to nonexistent host"
+spec:
+  selector:
+    matchLabels:
+      app: cartservice
+  template:
+    metadata:
+      labels:
+        app: cartservice
+    spec:
+      serviceAccountName: cartservice
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: cartservice
+        ports:
+        - containerPort: 7070
+        env:
+        - name: REDIS_ADDR
+          value: "redis-cart-broken:6379"   # <-- bad host, does not exist
+        resources:
+          requests:
+            cpu: 200m
+            memory: 64Mi
+          limits:
+            cpu: 300m
+            memory: 128Mi
+        readinessProbe:
+          initialDelaySeconds: 15
+          grpc:
+            port: 7070
+        livenessProbe:
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          grpc:
+            port: 7070

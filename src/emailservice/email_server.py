@@ -30,15 +30,11 @@ import demo_pb2_grpc
 from grpc_health.v1 import health_pb2
 from grpc_health.v1 import health_pb2_grpc
 
-from opentelemetry import trace
-from opentelemetry.instrumentation.grpc import GrpcInstrumentorServer
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-
 import googlecloudprofiler
 
 from logger import getJSONLogger
+
+from otel_setup import stamp_app_attrs
 logger = getJSONLogger('emailservice-server')
 
 # Loads confirmation email template from file
@@ -83,6 +79,7 @@ class EmailService(BaseEmailService):
     logger.info("Message sent: {}".format(response.rfc822_message_id))
 
   def SendOrderConfirmation(self, request, context):
+    stamp_app_attrs()
     email = request.email
     order = request.order
 
@@ -106,6 +103,7 @@ class EmailService(BaseEmailService):
 
 class DummyEmailService(BaseEmailService):
   def SendOrderConfirmation(self, request, context):
+    stamp_app_attrs()
     logger.info('A request to send order confirmation email to {} has been received.'.format(request.email))
     return demo_pb2.Empty()
 
@@ -174,25 +172,15 @@ if __name__ == '__main__':
   except KeyError:
       logger.info("Profiler disabled.")
 
-  # Tracing
+  # Tracing + metrics (OpenTelemetry)
   try:
-    if os.environ["ENABLE_TRACING"] == "1":
-      otel_endpoint = os.getenv("COLLECTOR_SERVICE_ADDR", "localhost:4317")
-      trace.set_tracer_provider(TracerProvider())
-      trace.get_tracer_provider().add_span_processor(
-        BatchSpanProcessor(
-            OTLPSpanExporter(
-            endpoint = otel_endpoint,
-            insecure = True
-          )
-        )
-      )
-    grpc_server_instrumentor = GrpcInstrumentorServer()
-    grpc_server_instrumentor.instrument()
-
-  except (KeyError, DefaultCredentialsError):
+    from otel_setup import configure_service_logging, init_opentelemetry
+    if init_opentelemetry():
+      configure_service_logging(logger)
+      logger.info("Tracing, metrics, and OTLP logging enabled via OpenTelemetry.")
+    else:
       logger.info("Tracing disabled.")
-  except Exception as e:
-      logger.warn(f"Exception on Cloud Trace setup: {traceback.format_exc()}, tracing disabled.") 
+  except Exception:
+      logger.warning(f"Exception on OpenTelemetry setup: {traceback.format_exc()}, tracing disabled.")
   
   start(dummy_mode = True)

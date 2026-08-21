@@ -1,0 +1,76 @@
+# Deploy Online Boutique with OpenTelemetry/Observe instrumentation baked in
+# from the start — app (with real ECR images) and all OTEL env wiring in one
+# apply, sending telemetry to the Observe Kubernetes agent.
+#
+# Prerequisite: the Observe Kubernetes agent must be installed in this
+# cluster (Observe UI: Data & integrations > Add data > Kubernetes — install
+# instructions include your own ingest token, entered directly into that
+# flow). This kustomization doesn't install the agent or hold any Observe
+# credentials itself — it only points apps at the agent's forwarder Service,
+# `observe-agent-forwarder.observe.svc.cluster.local:4317`. Install the agent
+# before or after applying this; either order works, but no telemetry
+# arrives until the agent is up.
+#
+# This layers on top of ../aws (kubernetes-manifests + the `images:` rewrite
+# to your ECR repo), so it inherits real image references instead of the
+# bare `image: frontend` names in kubernetes-manifests/ directly — applying
+# this without that rewrite in place produces ErrImagePull. In practice that
+# means going through deploy/aws/deploy.sh (see below), not applying this
+# kustomization standalone against ../aws/kustomization.yaml's
+# ECR_URI_PLACEHOLDER as-is.
+#
+# Usage:
+#   # install the Observe Kubernetes agent from the Observe UI first (or after)
+#   ./deploy/aws/deploy.sh
+#
+# Every service comes up already exporting traces/metrics to the agent
+# forwarder; stdout logs are picked up by the agent directly (not via OTLP).
+# No post-deploy patch scripts required. See README.md in this directory for
+# details, and for the standalone-collector alternative if you'd rather
+# self-host the collector instead of using the Observe agent.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../aws # kubernetes-manifests + the ECR image rewrite (images: transform)
+
+patches:
+  - path: patches/frontend.yaml
+  - path: patches/checkoutservice.yaml
+  - path: patches/cartservice.yaml
+  - path: patches/productcatalogservice.yaml
+  - path: patches/currencyservice.yaml
+  - path: patches/paymentservice.yaml
+  - path: patches/shippingservice.yaml
+  - path: patches/emailservice.yaml
+  - path: patches/recommendationservice.yaml
+  - path: patches/adservice.yaml
+
+# Shared OTel env, referenced via envFrom in every service patch. No secrets
+# here — the Observe Kubernetes agent handles its own ingest auth during its
+# own install; apps only ever talk to its in-cluster forwarder Service.
+configMapGenerator:
+  - name: observe-otel-env
+    literals:
+      - ENABLE_TRACING=1
+      - COLLECTOR_SERVICE_ADDR=observe-agent-forwarder.observe.svc.cluster.local:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observe-agent-forwarder.observe.svc.cluster.local:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_PROPAGATORS=tracecontext,baggage
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      # Logs go via stdout JSON -> the Observe agent's own log collection, not
+      # OTLP (the agent forwarder doesn't accept an OTLP logs pipeline the way
+      # the standalone collector did). "none" avoids pods retrying/logging
+      # failed log exports for no benefit.
+      - OTEL_LOGS_EXPORTER=none
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production,deployment.environment.name=production,service.version=1.0.0
+
+# Stamp deployment_environment as a pod label so Observe's APM infrastructure
+# metrics panels can match it via labels.deployment_environment = "production".
+# includeSelectors: false leaves matchLabels untouched — only pod templates get
+# the extra label, which is what Prometheus/kube-state-metrics scrapes.
+labels:
+  - pairs:
+      deployment_environment: production
+    includeSelectors: false
