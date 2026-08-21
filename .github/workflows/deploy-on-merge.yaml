@@ -1,0 +1,91 @@
+# Continuous deployment: on merge to main, build + push images via Skaffold
+# and roll them out to the `online-boutique` namespace on EKS.
+#
+# Runs on GitHub-hosted runners (ubuntu-latest) and authenticates to AWS via
+# OIDC (no long-lived AWS keys stored as secrets) — see the setup checklist
+# your operator needs to run once before this workflow can succeed:
+#   1. Create (or confirm) the GitHub OIDC identity provider in this AWS account.
+#   2. Create an IAM role trusted by that provider, scoped to this repo/branch.
+#   3. Grant that role ECR push + EKS describe-cluster permissions.
+#   4. Grant that IAM role access inside the EKS cluster itself (an EKS access
+#      entry, or an aws-auth ConfigMap mapping, depending on the cluster's
+#      authentication mode) — IAM permissions alone do not grant kubectl access.
+#   5. Add the role's ARN as a repo secret named AWS_DEPLOY_ROLE_ARN.
+#
+# Deliberately push-triggered (not cron/scheduled): deploying on merge keeps
+# the deploy timestamp tight to the commit timestamp, which matters for the
+# Observe correlation demo this pipeline feeds. A scheduled/batched deploy
+# would blur that link for no benefit here.
+name: Deploy to EKS (Skaffold)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'kubernetes-manifests/**'
+      - 'deploy/observe-skaffold/**'
+      - 'deploy/observe/patches/**'
+      - 'skaffold.yaml'
+      - '.github/workflows/deploy-on-merge.yaml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-online-boutique
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # required for AWS OIDC — do not drop this
+  contents: read
+
+env:
+  AWS_REGION: us-west-2
+  EKS_CLUSTER_NAME: online-boutique
+  ECR_REPO_NAME: online-boutique
+  NAMESPACE: online-boutique
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.32.0'
+
+      - name: Install Skaffold
+        run: |
+          curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
+          chmod +x skaffold
+          sudo mv skaffold /usr/local/bin/
+          skaffold version
+
+      - name: Update kubeconfig for the EKS cluster
+        run: aws eks update-kubeconfig --name "${{ env.EKS_CLUSTER_NAME }}" --region "${{ env.AWS_REGION }}"
+
+      - name: Ensure target namespace exists
+        run: |
+          kubectl create namespace "${{ env.NAMESPACE }}" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Build, push, and deploy with Skaffold
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          skaffold run \
+            --default-repo="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO_NAME }}" \
+            --namespace="${{ env.NAMESPACE }}"
+
+      - name: Wait for rollout
+        run: |
+          kubectl -n "${{ env.NAMESPACE }}" rollout status deployment/frontend --timeout=300s
+          kubectl -n "${{ env.NAMESPACE }}" rollout status deployment/productcatalogservice --timeout=180s
+          kubectl -n "${{ env.NAMESPACE }}" rollout status deployment/checkoutservice --timeout=180s
