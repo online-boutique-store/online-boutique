@@ -33,3 +33,7 @@ deploy/observe/observe-credentials.env
 
 # Cortex Code IDE files
 .snowflake/
+
+# Generated at deploy time with the current commit SHA — see
+# deploy/observe-skaffold/README-service-version.md
+deploy/observe-skaffold/service-version.env
