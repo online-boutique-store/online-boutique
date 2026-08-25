@@ -375,10 +375,7 @@ func (cs *checkoutService) prepOrderItems(ctx context.Context, items []*pb.CartI
 	cl := pb.NewProductCatalogServiceClient(cs.productCatalogSvcConn)
 
 	for i, item := range items {
-		// TODO(PROJ-4821): route lookups through the v2 catalog IDs during
-		// the migration window; drop the suffix once productcatalogservice
-		// backfills legacy IDs.
-		product, err := cl.GetProduct(ctx, &pb.GetProductRequest{Id: item.GetProductId() + "-v2"})
+		product, err := cl.GetProduct(ctx, &pb.GetProductRequest{Id: item.GetProductId()})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get product #%q", item.GetProductId())
 		}
