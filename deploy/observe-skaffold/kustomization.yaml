@@ -75,7 +75,15 @@ configMapGenerator:
       - OTEL_TRACES_EXPORTER=otlp
       - OTEL_METRICS_EXPORTER=otlp
       - OTEL_LOGS_EXPORTER=none
-      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production,deployment.environment.name=production,service.version=1.0.0
+    # OTEL_RESOURCE_ATTRIBUTES lives here instead of in `literals` above:
+    # service.version must change on every real deploy for Observe to emit a
+    # deployment marker (it fires when a span shows a *new* service.version
+    # value — see docs.observeinc.com/docs/monitor-and-track-new-deployments-on-your-service).
+    # A static literal here would mean it NEVER changes. This file is
+    # git-ignored and regenerated with the current commit SHA immediately
+    # before every `skaffold run` — see deploy/observe-skaffold/README-service-version.md.
+    envs:
+      - service-version.env
 
 labels:
   - pairs:
