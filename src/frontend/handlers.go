@@ -321,6 +321,9 @@ func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request
 		totalPrice = money.Must(money.Sum(totalPrice, multPrice))
 	}
 	totalPrice = money.Must(money.Sum(totalPrice, *shippingCost))
+	// Pre-checkout cart dollar value — see stampCartValueAttrs in
+	// otelattrs.go for why this is a direct span attribute, not baggage.
+	stampCartValueAttrs(r.Context(), totalPrice, len(cart))
 	year := time.Now().Year()
 
 	if err := templates.ExecuteTemplate(w, "cart", injectCommonTemplateData(r, map[string]interface{}{
@@ -395,6 +398,9 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 				Country:       payload.Country},
 		})
 	if err != nil {
+		// Capture what this failed checkout was worth before returning the
+		// error — see stampFailedCheckoutValue in otelattrs.go.
+		fe.stampFailedCheckoutValue(r.Context(), sessionID(r), currentCurrency(r))
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to complete the order"), http.StatusInternalServerError)
 		return
 	}

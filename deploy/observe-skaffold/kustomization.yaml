@@ -1,0 +1,83 @@
+# Deploy Online Boutique with OpenTelemetry/Observe instrumentation baked in,
+# built for use WITH Skaffold instead of the manual deploy/aws/deploy.sh path.
+#
+# Why this exists instead of reusing ../observe: ../observe layers on ../aws,
+# whose kustomization.yaml rewrites every `image:` field to a literal
+# `ECR_URI_PLACEHOLDER` string (substituted via `sed` at apply time by
+# deploy/aws/deploy.sh). Skaffold does its own image substitution — it looks
+# for the exact bare image names declared in skaffold.yaml's
+# `build.artifacts` (e.g. `productcatalogservice`) inside the rendered
+# manifests and swaps in the image it just built and pushed (tagged per
+# skaffold.yaml's `tagPolicy: gitCommit`, i.e. the actual commit SHA). If the
+# placeholder rewrite has already run, those bare names are gone and
+# Skaffold's substitution silently no-ops, leaving `ECR_URI_PLACEHOLDER`
+# literally in the applied manifest. So this overlay layers the same OTEL
+# patches directly on the bare kubernetes-manifests/ instead, and lets
+# Skaffold own image resolution end to end.
+#
+# patches/*.yaml here are DUPLICATES of ../observe/patches/*.yaml, not
+# references to them. First attempt referenced them directly
+# (`../observe/patches/frontend.yaml`) and kustomize refused to build:
+# "security; file '.../deploy/observe/patches/frontend.yaml' is not in or
+# below '.../deploy/observe-skaffold'" — kustomize's default load restrictor
+# blocks a kustomization from reading files outside its own root, as a path-
+# traversal guard. Loosening that (--load-restrictor=LoadRestrictionsNone)
+# is possible but weakens a real security boundary repo-wide just to solve a
+# local layout problem, so these patches are copied here instead. Tradeoff:
+# if the OTEL patches ever need to change, update both directories' copies.
+#
+# Namespace is intentionally NOT set here — pass --namespace=online-boutique
+# on the `skaffold run`/`skaffold dev` command line instead, so both Configs
+# in skaffold.yaml (`app`, which this file covers, and `loadgenerator`, which
+# deploys via rawYaml and never touches this file) land in the same
+# namespace consistently.
+#
+# Usage:
+#   ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+#   kubectl create namespace online-boutique --dry-run=client -o yaml | kubectl apply -f -
+#   skaffold run \
+#     --default-repo="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/online-boutique" \
+#     --namespace=online-boutique
+#
+# Prerequisite: the Observe Kubernetes agent must already be installed in
+# this cluster (it's cluster-scoped, so it picks up the new namespace
+# automatically — no agent-side config change needed). Apps only ever talk
+# to its in-cluster forwarder Service, same as ../observe.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../kubernetes-manifests # bare `image: <service>` names — Skaffold resolves these
+
+patches:
+  - path: patches/frontend.yaml
+  - path: patches/checkoutservice.yaml
+  - path: patches/cartservice.yaml
+  - path: patches/productcatalogservice.yaml
+  - path: patches/currencyservice.yaml
+  - path: patches/paymentservice.yaml
+  - path: patches/shippingservice.yaml
+  - path: patches/emailservice.yaml
+  - path: patches/recommendationservice.yaml
+  - path: patches/adservice.yaml
+
+# Same OTel env as ../observe — duplicated here (rather than shared) because
+# kustomize configMapGenerators don't compose cleanly across two independent
+# resource trees that both need to reference the generated ConfigMap by name.
+configMapGenerator:
+  - name: observe-otel-env
+    literals:
+      - ENABLE_TRACING=1
+      - COLLECTOR_SERVICE_ADDR=observe-agent-forwarder.observe.svc.cluster.local:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://observe-agent-forwarder.observe.svc.cluster.local:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_PROPAGATORS=tracecontext,baggage
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=none
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production,deployment.environment.name=production,service.version=1.0.0
+
+labels:
+  - pairs:
+      deployment_environment: production
+    includeSelectors: false

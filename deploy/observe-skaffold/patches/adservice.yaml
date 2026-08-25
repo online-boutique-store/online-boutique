@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adservice
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: observe-otel-env
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: adservice
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # adservice uses zero-code instrumentation via the OTel Java agent
+            # (baked into the image at build time — see src/adservice/Dockerfile).
+            # This activates it and matches the SDK env vars from the shared
+            # configmap that the agent also reads (OTEL_SERVICE_NAME,
+            # OTEL_EXPORTER_OTLP_ENDPOINT, etc.).
+            - name: JAVA_TOOL_OPTIONS
+              value: "-javaagent:/otel/opentelemetry-javaagent.jar"
+            - name: OTEL_INSTRUMENTATION_GRPC_ENABLED
+              value: "true"
+            - name: OTEL_INSTRUMENTATION_LOG4J2_APPENDER_EXPERIMENTAL_LOG_ATTRIBUTES
+              value: "true"
