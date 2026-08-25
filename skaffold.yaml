@@ -49,11 +49,30 @@ build:
   tagPolicy:
     gitCommit: {}
   local:
-    useBuildkit: false
+    # Was false. The legacy (non-BuildKit) builder is deprecated (Docker
+    # flags this on every build: "The legacy builder is deprecated and will
+    # be removed in a future release") and noticeably less stable building
+    # many images back-to-back/concurrently — "Docker build ran into
+    # internal error. Please retry." is a legacy-builder failure mode, not
+    # something specific to this project's config. BuildKit is the current
+    # default builder and what Docker actually recommends now.
+    useBuildkit: true
+    # Explicit push: true — the EKS cluster is remote, so Skaffold already
+    # defaults to pushing, but this makes it unambiguous in CI where the
+    # kubeconfig/context isn't set up until a later step, which could
+    # otherwise confuse Skaffold's local-vs-remote cluster auto-detection.
+    push: true
 manifests:
   kustomize:
     paths:
-    - kubernetes-manifests
+    # Was: kubernetes-manifests (bare, no OTEL wiring, no namespace control).
+    # Now points at deploy/observe-skaffold, which layers the same OTEL
+    # patches used by deploy/observe on top of the bare manifests, without
+    # deploy/aws's ECR_URI_PLACEHOLDER image rewrite (which would break
+    # Skaffold's own image substitution). Pass --namespace=online-boutique
+    # on the CLI to control where this lands; see
+    # deploy/observe-skaffold/kustomization.yaml for the full explanation.
+    - deploy/observe-skaffold
 deploy:
   kubectl: {}
 # "gcb" profile allows building and pushing the images

@@ -18,6 +18,8 @@ import (
 	"context"
 	"strings"
 
+	pb "github.com/GoogleCloudPlatform/microservices-demo/src/frontend/genproto"
+	"github.com/GoogleCloudPlatform/microservices-demo/src/frontend/money"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
@@ -59,4 +61,67 @@ func withBaggage(ctx context.Context, key, value string) context.Context {
 // comma-separated string (baggage values are strings).
 func withBaggageSlice(ctx context.Context, key string, values []string) context.Context {
 	return withBaggage(ctx, key, strings.Join(values, ","))
+}
+
+// moneyToFloat converts a pb.Money (whole units + fractional nanos, per the
+// google.type.Money convention) to a plain float64.
+func moneyToFloat(m pb.Money) float64 {
+	return float64(m.GetUnits()) + float64(m.GetNanos())/1e9
+}
+
+// stampCartValueAttrs sets the pre-checkout cart's dollar value directly on
+// the current span. Deliberately NOT routed through withBaggage/
+// stampAppAttrs — that path always stores values as strings (fine for
+// display, useless for Observe-side numeric aggregation like average cart
+// value). Call this once the cart total has been computed, on the cart-view
+// handler's span.
+func stampCartValueAttrs(ctx context.Context, total pb.Money, itemCount int) {
+	span := trace.SpanFromContext(ctx)
+	if !span.SpanContext().IsValid() {
+		return
+	}
+	span.SetAttributes(
+		attribute.Float64("app.cart.total_value", moneyToFloat(total)),
+		attribute.String("app.cart.currency", total.GetCurrencyCode()),
+		attribute.Int("app.cart.item_count", itemCount),
+	)
+}
+
+// stampFailedCheckoutValue is called when a checkout attempt errors out. It
+// re-fetches the user's cart and independently recomputes its dollar value,
+// so Observe can show not just that checkout failed, but how much revenue a
+// given incident window blocked. Best-effort: if the cart/product/currency
+// lookups themselves fail, it returns without attaching partial or
+// misleading numbers.
+func (fe *frontendServer) stampFailedCheckoutValue(ctx context.Context, userID, currency string) {
+	span := trace.SpanFromContext(ctx)
+	if !span.SpanContext().IsValid() {
+		return
+	}
+
+	cart, err := fe.getCart(ctx, userID)
+	if err != nil {
+		return
+	}
+
+	total := pb.Money{CurrencyCode: currency}
+	for _, item := range cart {
+		product, err := fe.getProduct(ctx, item.GetProductId())
+		if err != nil {
+			return
+		}
+		price, err := fe.convertCurrency(ctx, product.GetPriceUsd(), currency)
+		if err != nil {
+			return
+		}
+		multPrice := money.MultiplySlow(*price, uint32(item.GetQuantity()))
+		total = money.Must(money.Sum(total, multPrice))
+	}
+
+	span.SetAttributes(
+		attribute.Bool("app.checkout.failed", true),
+		attribute.Float64("app.checkout.failed_cart_value", moneyToFloat(total)),
+		attribute.String("app.checkout.failed_cart_currency", currency),
+		attribute.Int("app.checkout.failed_cart_item_count", len(cart)),
+	)
 }
