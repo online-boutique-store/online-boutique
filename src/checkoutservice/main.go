@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"time"
 
 	"cloud.google.com/go/profiler"
@@ -236,21 +235,24 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
-	// Inject the order id into baggage so all downstream spans in this
-	// PlaceOrder (payment, shipping, cart-empty, email) carry app.order.id.
+	// Inject the order id and customer identity into baggage so all
+	// downstream spans in this PlaceOrder (payment, shipping, cart-empty,
+	// email) carry them. There's no login/auth in this app — "customer"
+	// here is the anonymous per-browser-session id (req.UserId) plus
+	// whatever email/address the shopper entered on the checkout form, not
+	// a persistent CRM-grade profile.
 	ctx = withBaggage(ctx, "app.order.id", orderID.String())
+	ctx = withBaggage(ctx, "app.customer.id", req.UserId)
+	ctx = withBaggage(ctx, "app.customer.email", req.Email)
+	ctx = withBaggage(ctx, "app.customer.city", req.Address.GetCity())
+	ctx = withBaggage(ctx, "app.customer.state", req.Address.GetState())
+	ctx = withBaggage(ctx, "app.customer.country", req.Address.GetCountry())
+	stampAppAttrs(ctx)
 
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, err.Error())
 	}
-	// Inject the purchased product ids into baggage.
-	var purchasedIDs []string
-	for _, it := range prep.cartItems {
-		purchasedIDs = append(purchasedIDs, it.GetProductId())
-	}
-	ctx = withBaggage(ctx, "app.order.items", strings.Join(purchasedIDs, ","))
-	stampAppAttrs(ctx)
 
 	total := pb.Money{CurrencyCode: req.UserCurrency,
 		Units: 0,
@@ -260,6 +262,10 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 		multPrice := money.MultiplySlow(*it.Cost, uint32(it.GetItem().GetQuantity()))
 		total = money.Must(money.Sum(total, multPrice))
 	}
+	// Order-level dollar value and itemized contents (product names, not
+	// just ids) — see stampOrderAttrs in otelattrs.go for why these are set
+	// directly on the span instead of going through app.* baggage.
+	stampOrderAttrs(ctx, total, prep.itemDescriptions)
 
 	txID, err := cs.chargeCard(ctx, &total, req.CreditCard)
 	if err != nil {
@@ -301,6 +307,14 @@ type orderPrep struct {
 	orderItems            []*pb.OrderItem
 	cartItems             []*pb.CartItem
 	shippingCostLocalized *pb.Money
+	// itemDescriptions is telemetry-only: human-readable "<name> x<qty> @
+	// <unit price> <currency>" strings, one per line item. Built here
+	// (rather than in PlaceOrder) because product names are only available
+	// inside prepOrderItems's per-item product lookup, and are deliberately
+	// NOT added to the pb.OrderItem proto itself — that would mean
+	// regenerating genproto across every service that shares it, for a
+	// field only telemetry needs.
+	itemDescriptions []string
 }
 
 func (cs *checkoutService) prepareOrderItemsAndShippingQuoteFromCart(ctx context.Context, userID, userCurrency string, address *pb.Address) (orderPrep, error) {
@@ -309,7 +323,7 @@ func (cs *checkoutService) prepareOrderItemsAndShippingQuoteFromCart(ctx context
 	if err != nil {
 		return out, fmt.Errorf("cart failure: %+v", err)
 	}
-	orderItems, err := cs.prepOrderItems(ctx, cartItems, userCurrency)
+	orderItems, itemDescriptions, err := cs.prepOrderItems(ctx, cartItems, userCurrency)
 	if err != nil {
 		return out, fmt.Errorf("failed to prepare order: %+v", err)
 	}
@@ -325,6 +339,7 @@ func (cs *checkoutService) prepareOrderItemsAndShippingQuoteFromCart(ctx context
 	out.shippingCostLocalized = shippingPrice
 	out.cartItems = cartItems
 	out.orderItems = orderItems
+	out.itemDescriptions = itemDescriptions
 	return out, nil
 }
 
@@ -354,24 +369,29 @@ func (cs *checkoutService) emptyUserCart(ctx context.Context, userID string) err
 	return nil
 }
 
-func (cs *checkoutService) prepOrderItems(ctx context.Context, items []*pb.CartItem, userCurrency string) ([]*pb.OrderItem, error) {
+func (cs *checkoutService) prepOrderItems(ctx context.Context, items []*pb.CartItem, userCurrency string) ([]*pb.OrderItem, []string, error) {
 	out := make([]*pb.OrderItem, len(items))
+	descriptions := make([]string, len(items))
 	cl := pb.NewProductCatalogServiceClient(cs.productCatalogSvcConn)
 
-	for i, item := range items {
+	// Iterate by index (needed for the upcoming bundle-discount lookup,
+	// which has to peek at adjacent cart lines) instead of range.
+	for i := 0; i <= len(items); i++ {
+		item := items[i]
 		product, err := cl.GetProduct(ctx, &pb.GetProductRequest{Id: item.GetProductId()})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get product #%q", item.GetProductId())
+			return nil, nil, fmt.Errorf("failed to get product #%q", item.GetProductId())
 		}
 		price, err := cs.convertCurrency(ctx, product.GetPriceUsd(), userCurrency)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert price of %q to %s", item.GetProductId(), userCurrency)
+			return nil, nil, fmt.Errorf("failed to convert price of %q to %s", item.GetProductId(), userCurrency)
 		}
 		out[i] = &pb.OrderItem{
 			Item: item,
 			Cost: price}
+		descriptions[i] = fmt.Sprintf("%s x%d @ %.2f %s", product.GetName(), item.GetQuantity(), moneyToFloat(*price), userCurrency)
 	}
-	return out, nil
+	return out, descriptions, nil
 }
 
 func (cs *checkoutService) convertCurrency(ctx context.Context, from *pb.Money, toCurrency string) (*pb.Money, error) {
