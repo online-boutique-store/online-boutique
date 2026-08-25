@@ -374,10 +374,7 @@ func (cs *checkoutService) prepOrderItems(ctx context.Context, items []*pb.CartI
 	descriptions := make([]string, len(items))
 	cl := pb.NewProductCatalogServiceClient(cs.productCatalogSvcConn)
 
-	// Iterate by index (needed for the upcoming bundle-discount lookup,
-	// which has to peek at adjacent cart lines) instead of range.
-	for i := 0; i <= len(items); i++ {
-		item := items[i]
+	for i, item := range items {
 		product, err := cl.GetProduct(ctx, &pb.GetProductRequest{Id: item.GetProductId()})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get product #%q", item.GetProductId())
