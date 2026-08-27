@@ -1,0 +1,21 @@
+uuid,name,email,address,country,credit_card,user_currency,customer_tier,lifetime_value_usd,signup_date
+c1a1f2b0-0001-4a4a-9c1a-1a2b3c4d5e01,Allison Hill,donaldgarcia@example.net,"600 Jeffery Parkways, New Jamesside, MT 29394",Kiribati,**** **** **** 1552,USD,Silver,2353.88,2025-05-31
+c1a1f2b0-0002-4a4a-9c1a-1a2b3c4d5e02,Monica Herrera,smiller@example.net,"310 Kendra Common Apt. 164, Reidstad, GA 49021",Guinea,**** **** **** 3509,EUR,Gold,6682.36,2024-04-27
+c1a1f2b0-0003-4a4a-9c1a-1a2b3c4d5e03,Ethan Adams,robinbradley@example.net,"76724 John Points Suite 969, Coxberg, NY 65187",Bermuda,**** **** **** 4804,JPY,Silver,717.35,2025-08-21
+c1a1f2b0-0004-4a4a-9c1a-1a2b3c4d5e04,Stephen Potter,daniel62@example.com,"482 Monica Hills, East Nathaniel, GA 71198",Zimbabwe,**** **** **** 1170,USD,Silver,734.24,2026-01-12
+c1a1f2b0-0005-4a4a-9c1a-1a2b3c4d5e05,Kim Martinez,karroyo@example.com,"83465 Lam Mission Apt. 331, Andrewside, IN 77629",Cyprus,**** **** **** 3821,JPY,Gold,3132.68,2025-10-06
+c1a1f2b0-0006-4a4a-9c1a-1a2b3c4d5e06,Laura Sanchez,maguirre@example.org,"656 Owens Stream, Lake Deniseville, AR 53273",Saint Lucia,**** **** **** 3179,AUD,Gold,6506.62,2026-01-04
+c1a1f2b0-0007-4a4a-9c1a-1a2b3c4d5e07,Annette Pearson,novaksara@example.org,"7736 Franklin Alley, Bakermouth, LA 55945",Qatar,**** **** **** 9789,CAD,Silver,1973.16,2026-05-03
+c1a1f2b0-0008-4a4a-9c1a-1a2b3c4d5e08,Amy Romero,caseyjones@example.org,"93990 Robert Prairie Suite 435, West Randy, TN 85108",French Southern Territories,**** **** **** 4256,USD,Bronze,391.46,2026-03-23
+c1a1f2b0-0009-4a4a-9c1a-1a2b3c4d5e09,Jaclyn Moore,cheryl80@example.net,"124 Pamela Summit Apt. 449, Lake Matthew, TX 83631",Timor-Leste,**** **** **** 4279,CAD,Gold,4701.25,2025-04-06
+c1a1f2b0-0010-4a4a-9c1a-1a2b3c4d5e10,Adam Jones,amydavenport@example.net,"2045 Rachel Fords, Lake Curtis, WI 73886",Turks and Caicos Islands,**** **** **** 4210,GBP,Gold,3511.05,2024-10-07
+c1a1f2b0-0011-4a4a-9c1a-1a2b3c4d5e11,John Gonzalez,ybailey@example.org,"36541 Bell Pass, Frazierside, MA 04118",Brazil,**** **** **** 8162,GBP,Silver,2618.74,2026-04-11
+c1a1f2b0-0012-4a4a-9c1a-1a2b3c4d5e12,Andrew Graham,michaeljones@example.net,"514 Estrada Islands Suite 482, South Elizabeth, MS 89278",San Marino,**** **** **** 9573,USD,Silver,2324.33,2024-12-09
+c1a1f2b0-0013-4a4a-9c1a-1a2b3c4d5e13,Kayla Leon,donnacampbell@example.net,"34332 Brandon Mountains Apt. 769, Lake Heather, NM 52884",Ecuador,**** **** **** 7275,CAD,Silver,697.0,2025-08-07
+c1a1f2b0-0014-4a4a-9c1a-1a2b3c4d5e14,Linda Dodson DVM,jrivas@example.com,"774 Mary Harbor, Simsview, NV 10656",Rwanda,**** **** **** 3161,AUD,Gold,6092.6,2024-11-03
+c1a1f2b0-0015-4a4a-9c1a-1a2b3c4d5e15,Jennifer Clark,xprice@example.net,"670 Evans Loaf, Medinaside, AS 79570",Ukraine,**** **** **** 2981,JPY,Bronze,136.53,2023-09-24
+c1a1f2b0-0016-4a4a-9c1a-1a2b3c4d5e16,Justin Johnson,dtaylor@example.org,"6537 Rogers Light, Karenchester, KS 11236",Latvia,**** **** **** 2323,AUD,Platinum,11874.27,2025-01-12
+c1a1f2b0-0017-4a4a-9c1a-1a2b3c4d5e17,Travis Marshall,katie29@example.net,"41904 Sanders Stravenue, North Brittany, MP 82714",Ecuador,**** **** **** 5068,USD,Gold,7276.59,2026-01-19
+c1a1f2b0-0018-4a4a-9c1a-1a2b3c4d5e18,Tyler Reid,bzimmerman@example.org,"877 Petersen Ramp Suite 531, Nicolebury, WV 61411",Montenegro,**** **** **** 9489,CAD,Bronze,175.09,2023-09-06
+c1a1f2b0-0019-4a4a-9c1a-1a2b3c4d5e19,Angela Cortez,ppeters@example.net,"770 Kelly Lodge Apt. 495, Transtad, NE 98272",Mexico,**** **** **** 2335,GBP,Silver,906.64,2025-10-22
+c1a1f2b0-0020-4a4a-9c1a-1a2b3c4d5e20,Kevin Wolf,tina34@example.org,"40824 Terri Plaza Suite 271, New Justinfort, NV 45158",Colombia,**** **** **** 9418,AUD,Silver,1167.44,2026-07-21
