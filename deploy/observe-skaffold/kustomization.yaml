@@ -95,9 +95,9 @@ configMapGenerator:
     literals:
       - PROMPT_VERSION=v1
       - FAULT_INJECTION=
-      # Must be a model/inference-profile ID enabled in the target AWS account
-      # and region - NOT verified against any account yet.
-      - BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      # Listed ACTIVE (inference profile + foundation model) in account
+      # 739672403694 on 2026-10-16. claude-sonnet-4-5 is LEGACY there.
+      - BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-6
       - AWS_REGION=us-west-2
       - MAX_TOOL_STEPS=5
       - MAX_COMPLETION_TOKENS=1024

@@ -17,7 +17,7 @@ def _int(name, default):
 # is NOT verified against any account. Confirm with:
 #   aws bedrock list-inference-profiles
 AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
-BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 # Only for local fakes/tests; leave unset in real deployments.
 BEDROCK_ENDPOINT_URL = os.environ.get("BEDROCK_ENDPOINT_URL") or None
 BEDROCK_TIMEOUT_S = _int("BEDROCK_TIMEOUT_S", 60)

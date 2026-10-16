@@ -2,7 +2,7 @@
 
 ## What This Demonstrates
 
-The shopping assistant is a Python Flask agent that calls Claude on **Amazon Bedrock** through the Converse API. It runs real tool calls against the existing Online Boutique gRPC services. The default model is the US cross-region inference profile `us.anthropic.claude-sonnet-4-5-20250929-v1:0`, which hasn't yet been checked against your account.
+The shopping assistant is a Python Flask agent that calls Claude on **Amazon Bedrock** through the Converse API. It runs real tool calls against the existing Online Boutique gRPC services. The default model is the US cross-region inference profile `us.anthropic.claude-sonnet-4-6`. It is listed ACTIVE in account `739672403694`; the older `claude-sonnet-4-5` foundation model there is LEGACY.
 
 A trace runs:
 
