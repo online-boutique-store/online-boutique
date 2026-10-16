@@ -1,0 +1,189 @@
+"""Agent tools: thin wrappers over the existing Online Boutique gRPC services.
+
+Every tool returns a plain dict. On backend failure it returns
+{"error": ..., "grpc_status": ...} (never raises, never fabricates success) so
+the model can report the real outcome. The agent layer turns those into span
+status / metrics.
+"""
+import datetime
+
+import grpc
+
+import config
+import demo_pb2 as pb
+import demo_pb2_grpc as pbg
+
+_channels = {}
+
+
+def _stub(addr, stub_cls):
+    if addr not in _channels:
+        _channels[addr] = grpc.insecure_channel(addr)
+    return stub_cls(_channels[addr])
+
+
+def _catalog():
+    return _stub(config.CATALOG_ADDR, pbg.ProductCatalogServiceStub)
+
+
+def _cart():
+    return _stub(config.CART_ADDR, pbg.CartServiceStub)
+
+
+def _currency():
+    return _stub(config.CURRENCY_ADDR, pbg.CurrencyServiceStub)
+
+
+def _checkout():
+    return _stub(config.CHECKOUT_ADDR, pbg.CheckoutServiceStub)
+
+
+def _money_usd(m):
+    return round(m.units + m.nanos / 1e9, 2)
+
+
+def _fmt_money(m):
+    return {"currency_code": m.currency_code, "amount": round(m.units + m.nanos / 1e9, 2)}
+
+
+def _product(p):
+    return {"id": p.id, "name": p.name, "description": p.description,
+            "price_usd": _money_usd(p.price_usd), "categories": list(p.categories)}
+
+
+def _err(e):
+    code = e.code().name if hasattr(e, "code") and e.code() else "UNKNOWN"
+    return {"error": f"{code}: {e.details()}", "grpc_status": code}
+
+
+_price_cache = {}
+
+
+def _price_usd(product_id):
+    if product_id not in _price_cache:
+        p = _catalog().GetProduct(pb.GetProductRequest(id=product_id), timeout=config.GRPC_TIMEOUT_S)
+        _price_cache[product_id] = (p.name, _money_usd(p.price_usd))
+    return _price_cache[product_id]
+
+
+_supported = {"codes": None}
+
+
+def supported_currencies():
+    """Cached list of codes the currency service accepts (observability only -
+    never used to gate or repair tool arguments)."""
+    if _supported["codes"] is None:
+        try:
+            r = _currency().GetSupportedCurrencies(pb.Empty(), timeout=config.GRPC_TIMEOUT_S)
+            _supported["codes"] = set(r.currency_codes)
+        except grpc.RpcError:
+            return set()
+    return _supported["codes"]
+
+
+# --- tools ---------------------------------------------------------------------
+def search_products(user_id, query):
+    try:
+        found, seen = [], set()
+        terms = [query] + [w for w in query.split() if w.lower() != query.lower()]
+        for term in terms:
+            r = _catalog().SearchProducts(pb.SearchProductsRequest(query=term), timeout=config.GRPC_TIMEOUT_S)
+            for p in r.results:
+                if p.id not in seen:
+                    seen.add(p.id)
+                    found.append(_product(p))
+            if found:
+                break
+        return {"results": found, "count": len(found)}
+    except grpc.RpcError as e:
+        return _err(e)
+
+
+def get_product(user_id, product_id):
+    try:
+        return _product(_catalog().GetProduct(pb.GetProductRequest(id=product_id), timeout=config.GRPC_TIMEOUT_S))
+    except grpc.RpcError as e:
+        return _err(e)
+
+
+def convert_price(user_id, amount_usd, currency_code):
+    units = int(amount_usd)
+    nanos = int(round((amount_usd - units) * 1e9))
+    try:
+        out = _currency().Convert(
+            pb.CurrencyConversionRequest(
+                **{"from": pb.Money(currency_code="USD", units=units, nanos=nanos)}, to_code=currency_code),
+            timeout=config.GRPC_TIMEOUT_S)
+        return {"converted": _fmt_money(out)}
+    except grpc.RpcError as e:
+        return _err(e)
+
+
+def add_to_cart(user_id, product_id, quantity):
+    try:
+        _cart().AddItem(pb.AddItemRequest(
+            user_id=user_id, item=pb.CartItem(product_id=product_id, quantity=int(quantity))),
+            timeout=config.GRPC_TIMEOUT_S)
+        return {"added": {"product_id": product_id, "quantity": int(quantity)}}
+    except grpc.RpcError as e:
+        return _err(e)
+
+
+def cart_contents(user_id):
+    """(items, value_usd) - used by get_cart and for checkout value telemetry."""
+    cart = _cart().GetCart(pb.GetCartRequest(user_id=user_id), timeout=config.GRPC_TIMEOUT_S)
+    items, total = [], 0.0
+    for it in cart.items:
+        name, price = _price_usd(it.product_id)
+        total += price * it.quantity
+        items.append({"product_id": it.product_id, "name": name, "quantity": it.quantity,
+                      "unit_price_usd": price})
+    return items, round(total, 2)
+
+
+def get_cart(user_id):
+    try:
+        items, total = cart_contents(user_id)
+        return {"items": items, "total_usd": total}
+    except grpc.RpcError as e:
+        return _err(e)
+
+
+# Synthetic customer data - this is a demo store, nothing here is real.
+_ADDRESS = dict(street_address="1600 Amphitheatre Parkway", city="Mountain View",
+                state="CA", country="United States", zip_code=94043)
+_TEST_CARD = "4432-8015-6152-0454"  # the stock Online Boutique test Visa
+
+
+def place_order(user_id, currency_code):
+    year = datetime.date.today().year + 2
+    try:
+        resp = _checkout().PlaceOrder(pb.PlaceOrderRequest(
+            user_id=user_id,
+            user_currency=currency_code,
+            address=pb.Address(**_ADDRESS),
+            email=f"{user_id[:8]}@example.com",
+            credit_card=pb.CreditCardInfo(
+                credit_card_number=_TEST_CARD, credit_card_cvv=672,
+                credit_card_expiration_year=year, credit_card_expiration_month=1)),
+            timeout=config.GRPC_TIMEOUT_S)
+        o = resp.order
+        return {
+            "order_id": o.order_id,
+            "shipping_tracking_id": o.shipping_tracking_id,
+            "shipping_cost": _fmt_money(o.shipping_cost),
+            "items": [{"product_id": i.item.product_id, "quantity": i.item.quantity,
+                       "cost": _fmt_money(i.cost)} for i in o.items],
+        }
+    except grpc.RpcError as e:
+        return _err(e)
+
+
+TOOLS = {
+    "search_products": search_products,
+    "get_product": get_product,
+    "convert_price": convert_price,
+    "add_to_cart": add_to_cart,
+    "get_cart": get_cart,
+    "place_order": place_order,
+}
