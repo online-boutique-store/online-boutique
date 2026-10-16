@@ -102,6 +102,17 @@ function convert (call, callback) {
     _getCurrencyData((data) => {
       const request = call.request;
 
+      // Reject unsupported currency codes. Without this, an unknown code makes
+      // data[code] undefined, the math yields NaN, and the caller silently
+      // receives a zero-value Money instead of an error.
+      const unsupported = [request.from.currency_code, request.to_code]
+        .filter((c) => !Object.prototype.hasOwnProperty.call(data, c));
+      if (unsupported.length > 0) {
+        const message = `unsupported currency code: ${JSON.stringify(unsupported[0])}`;
+        logger.error(`conversion request rejected: ${message}`);
+        return callback({ code: grpc.status.INVALID_ARGUMENT, message });
+      }
+
       // Convert: from_currency --> EUR
       const from = request.from;
       const euros = _carry({
