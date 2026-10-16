@@ -22,3 +22,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Enables the /assistant page + /bot proxy to shoppingassistantservice.
+            - name: ENABLE_ASSISTANT
+              value: "true"

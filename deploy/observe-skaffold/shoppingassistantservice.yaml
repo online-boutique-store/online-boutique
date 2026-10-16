@@ -1,0 +1,124 @@
+# Shopping assistant: a Snowflake Cortex tool-calling agent (see docs/ai-demo.md).
+#
+# Lives in this overlay (not kubernetes-manifests/) on purpose: kustomize cannot
+# read files outside its root, and the default deploy has no Cortex credentials,
+# so the assistant is opt-in to the Observe/skaffold deploy only.
+#
+# Requires a Secret named `cortex-credentials` with keys `base-url` and `pat`,
+# created out-of-band and never committed: deploy/observe/create-cortex-secret.sh
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shoppingassistantservice
+  labels:
+    app: shoppingassistantservice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shoppingassistantservice
+  template:
+    metadata:
+      labels:
+        app: shoppingassistantservice
+    spec:
+      serviceAccountName: shoppingassistantservice
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: shoppingassistantservice
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          periodSeconds: 5
+          httpGet:
+            path: /healthz
+            port: 8080
+        livenessProbe:
+          periodSeconds: 10
+          httpGet:
+            path: /healthz
+            port: 8080
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: shoppingassistantservice
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # observe-otel-env sets OTEL_LOGS_EXPORTER=none for the other services;
+        # the assistant ships its logs over OTLP so trace_id/span_id are stamped
+        # on every record (explicit env beats envFrom).
+        - name: OTEL_LOGS_EXPORTER
+          value: otlp
+        - name: PORT
+          value: "8080"
+        - name: PRODUCT_CATALOG_SERVICE_ADDR
+          value: "productcatalogservice:3550"
+        - name: CART_SERVICE_ADDR
+          value: "cartservice:7070"
+        - name: CURRENCY_SERVICE_ADDR
+          value: "currencyservice:7000"
+        - name: CHECKOUT_SERVICE_ADDR
+          value: "checkoutservice:5050"
+        - name: CORTEX_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: cortex-credentials
+              key: base-url
+        - name: CORTEX_PAT
+          valueFrom:
+            secretKeyRef:
+              name: cortex-credentials
+              key: pat
+        # Assistant behaviour + incident switches live in one ConfigMap so a
+        # demo toggle is a single `kubectl set env`/patch (see docs/ai-demo.md).
+        envFrom:
+        - configMapRef:
+            name: observe-otel-env
+        - configMapRef:
+            name: shopping-assistant-config
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shoppingassistantservice
+  labels:
+    app: shoppingassistantservice
+spec:
+  type: ClusterIP
+  selector:
+    app: shoppingassistantservice
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shoppingassistantservice

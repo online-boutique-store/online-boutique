@@ -48,6 +48,7 @@ kind: Kustomization
 
 resources:
   - ../../kubernetes-manifests # bare `image: <service>` names — Skaffold resolves these
+  - shoppingassistantservice.yaml # Cortex agent; needs the `cortex-credentials` Secret (see docs/ai-demo.md)
 
 patches:
   - path: patches/frontend.yaml
@@ -84,6 +85,23 @@ configMapGenerator:
     # before every `skaffold run` — see deploy/observe-skaffold/README-service-version.md.
     envs:
       - service-version.env
+
+  # Shopping assistant behaviour + incident switches. Editing PROMPT_VERSION here
+  # and redeploying is the "prompt regression ships as a commit" path: the new
+  # commit SHA becomes service.version, so Observe's deployment marker and the
+  # Commit_Context enrichment point at the change. For a quick live toggle without
+  # a commit, see deploy/observe/ai-demo-toggle.sh.
+  - name: shopping-assistant-config
+    literals:
+      - PROMPT_VERSION=v1
+      - FAULT_INJECTION=
+      - CORTEX_MODEL=claude-sonnet-4-5
+      - MAX_TOOL_STEPS=5
+      - MAX_COMPLETION_TOKENS=1024
+      - RATE_LIMIT_RPM=30
+      # The instrumentation only accepts SPAN_ONLY / EVENT_ONLY / SPAN_AND_EVENT;
+      # "true" is silently treated as NO_CONTENT (verified).
+      - OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY
 
 labels:
   - pairs:

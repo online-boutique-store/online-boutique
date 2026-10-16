@@ -158,12 +158,25 @@ def _configure_logging(otlp_logs):
         log.addHandler(h)
 
 
+def _identity(fields):
+    """AppLogs resolves the customer from attributes["UserId"] (cartservice style)
+    or the JSON body's "session" key (frontend style). Provide both so assistant
+    logs join to Customer_Records without changing that pipeline."""
+    sid = fields.get("app.session.id")
+    if sid:
+        fields.setdefault("UserId", sid)
+        fields.setdefault("session", sid)
+    return fields
+
+
 def event(message, **fields):
     """Emit a structured business/outcome log. `fields` become log attributes."""
+    fields = _identity(fields)
     logging.getLogger("assistant").info(message, extra={"fields": fields} if _stdout_mode() else fields)
 
 
 def warn(message, **fields):
+    fields = _identity(fields)
     logging.getLogger("assistant").warning(message, extra={"fields": fields} if _stdout_mode() else fields)
 
 

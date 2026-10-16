@@ -200,7 +200,8 @@ def _execute_tool(session, call, labels):
             span.set_attribute("error.type", result.get("grpc_status", "tool_error"))
             tel.tool_errors_total.add(1, {**tool_labels, "error.type": result.get("grpc_status", "tool_error")})
             tel.warn("tool.error", **{"tool.name": name, "error": _clip(result["error"], 300),
-                                      "fault.injected": injected, "prompt.version": labels["prompt.version"]})
+                                      "fault.injected": injected, "prompt.version": labels["prompt.version"],
+                                      "app.session.id": session.id, "app.customer.id": session.id})
         if is_checkout:
             _record_checkout(session, span, result, value_usd, injected, labels)
         return result

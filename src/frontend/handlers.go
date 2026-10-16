@@ -31,6 +31,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/frontend/genproto"
 	"github.com/GoogleCloudPlatform/microservices-demo/src/frontend/money"
@@ -492,32 +493,51 @@ func (fe *frontendServer) getProductByID(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 }
 
+// assistantClient carries the request's trace context and baggage (app.session.id,
+// etc.) to the shopping assistant, so its spans join the frontend's trace.
+var assistantClient = &http.Client{
+	Transport: otelhttp.NewTransport(http.DefaultTransport),
+	Timeout:   90 * time.Second,
+}
+
 func (fe *frontendServer) chatBotHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	type Response struct {
 		Message string `json:"message"`
+		TraceID string `json:"trace_id,omitempty"`
+		Outcome string `json:"outcome,omitempty"`
 	}
 
 	type LLMResponse struct {
-		Content string         `json:"content"`
-		Details map[string]any `json:"details"`
+		Content string `json:"content"`
+		TraceID string `json:"trace_id"`
+		Details struct {
+			Outcome string `json:"outcome"`
+		} `json:"details"`
 	}
 
 	var response LLMResponse
 
 	url := "http://" + fe.shoppingAssistantSvcAddr
-	req, err := http.NewRequest(http.MethodPost, url, r.Body)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, r.Body)
 	if err != nil {
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to create request"), http.StatusInternalServerError)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	req.Header.Set("X-Session-ID", sessionID(r))
+	for _, h := range []string{"X-Prompt-Category", "X-Conversation-ID"} {
+		if v := r.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
+	res, err := assistantClient.Do(req)
 	if err != nil {
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to send request"), http.StatusInternalServerError)
 		return
 	}
+	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -525,19 +545,20 @@ func (fe *frontendServer) chatBotHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	fmt.Printf("%+v\n", body)
-	fmt.Printf("%+v\n", res)
-
 	err = json.Unmarshal(body, &response)
 	if err != nil {
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to unmarshal body"), http.StatusInternalServerError)
 		return
 	}
 
-	// respond with the same message
-	json.NewEncoder(w).Encode(Response{Message: response.Content})
+	log.WithFields(logrus.Fields{
+		"assistant.status":  res.StatusCode,
+		"assistant.outcome": response.Details.Outcome,
+	}).Info("assistant responded")
 
-	w.WriteHeader(http.StatusOK)
+	// The UI only reads "message"; trace_id/outcome let callers (load generator,
+	// support) jump straight to the agent trace.
+	json.NewEncoder(w).Encode(Response{Message: response.Content, TraceID: response.TraceID, Outcome: response.Details.Outcome})
 }
 
 func (fe *frontendServer) setCurrencyHandler(w http.ResponseWriter, r *http.Request) {
