@@ -1,11 +1,14 @@
-# Shopping assistant: a Snowflake Cortex tool-calling agent (see docs/ai-demo.md).
+# Shopping assistant: an Amazon Bedrock (Converse API) tool-calling agent (see docs/ai-demo.md).
 #
 # Lives in this overlay (not kubernetes-manifests/) on purpose: kustomize cannot
-# read files outside its root, and the default deploy has no Cortex credentials,
-# so the assistant is opt-in to the Observe/skaffold deploy only.
+# read files outside its root, and the assistant needs AWS IAM setup the default
+# deploy doesn't have, so it is opt-in to the Observe/skaffold deploy only.
 #
-# Requires a Secret named `cortex-credentials` with keys `base-url` and `pat`,
-# created out-of-band and never committed: deploy/observe/create-cortex-secret.sh
+# AWS credentials: NONE are configured here. The pod gets them from the standard
+# AWS chain via its ServiceAccount, using either EKS Pod Identity (an association
+# for namespace/serviceaccount -> IAM role) or IRSA (uncomment the annotation on
+# the ServiceAccount below). The role needs bedrock:Converse/InvokeModel on the
+# chosen model or inference profile. See docs/ai-demo.md.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -78,16 +81,6 @@ spec:
           value: "currencyservice:7000"
         - name: CHECKOUT_SERVICE_ADDR
           value: "checkoutservice:5050"
-        - name: CORTEX_BASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: cortex-credentials
-              key: base-url
-        - name: CORTEX_PAT
-          valueFrom:
-            secretKeyRef:
-              name: cortex-credentials
-              key: pat
         # Assistant behaviour + incident switches live in one ConfigMap so a
         # demo toggle is a single `kubectl set env`/patch (see docs/ai-demo.md).
         envFrom:
@@ -122,3 +115,6 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: shoppingassistantservice
+  # IRSA alternative to EKS Pod Identity - set your role ARN and uncomment:
+  # annotations:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::<account-id>:role/<bedrock-invoke-role>

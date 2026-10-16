@@ -1,19 +1,22 @@
-"""The shopping agent: a plain tool-calling loop against Snowflake Cortex.
+"""The shopping agent: a plain tool-calling loop against Amazon Bedrock (Converse API).
 
 Span tree per customer prompt (children of the Flask server span):
 
   invoke_agent shopping_assistant        (this module)
-    chat <model>                         (opentelemetry-instrumentation-openai-v2)
+    chat <model id>                      (opentelemetry-instrumentation-botocore)
     execute_tool <name>                  (this module)
       <grpc client span> ...             (GrpcInstrumentorClient) -> existing services
-    chat <model>
+    chat <model id>
 """
 import collections
 import json
 import threading
 import time
 
-import openai
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import (BotoCoreError, ClientError, ConnectionClosedError,
+                                 EndpointConnectionError, NoCredentialsError, ReadTimeoutError)
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
@@ -25,7 +28,7 @@ import telemetry as tel
 tracer = tel.tracer
 
 AGENT_NAME = "shopping_assistant"
-PROVIDER = "snowflake.cortex"
+PROVIDER = "aws.bedrock"
 _MAX_ATTR = 1000
 
 
@@ -88,45 +91,62 @@ def _admit():
 
 
 def _llm():
-    if not config.cortex_configured():
+    if not config.bedrock_configured():
         raise NotConfigured()
     if _client["c"] is None:
-        # max_retries=0: retries are done in _chat so each one is visible in telemetry.
-        _client["c"] = openai.OpenAI(
-            api_key=config.CORTEX_PAT, base_url=config.CORTEX_BASE_URL,
-            timeout=config.CORTEX_TIMEOUT_S, max_retries=0)
+        # max_attempts=1: retries are done in _chat so each one is visible in telemetry.
+        _client["c"] = boto3.client(
+            "bedrock-runtime", region_name=config.AWS_REGION, endpoint_url=config.BEDROCK_ENDPOINT_URL,
+            config=BotoConfig(read_timeout=config.BEDROCK_TIMEOUT_S, connect_timeout=10,
+                              retries={"max_attempts": 1, "mode": "standard"}))
     return _client["c"]
 
 
-_RETRYABLE = (openai.APIConnectionError, openai.APITimeoutError,
-              openai.RateLimitError, openai.InternalServerError)
+class LLMError(Exception):
+    pass
 
 
-def _chat(messages, tools, agent_span, labels):
+_RETRYABLE_CODES = {"ThrottlingException", "ServiceUnavailableException", "InternalServerException",
+                    "ModelNotReadyException", "ModelTimeoutException"}
+_RETRYABLE_TRANSPORT = (EndpointConnectionError, ReadTimeoutError, ConnectionClosedError)
+
+
+def _chat(system, messages, tools, agent_span, labels):
     attempt = 0
     while True:
         _admit()
         try:
-            resp = _llm().chat.completions.create(
-                model=config.CORTEX_MODEL,
+            resp = _llm().converse(
+                modelId=config.BEDROCK_MODEL_ID,
+                system=[{"text": system}],
                 messages=messages,
-                tools=tools,
-                temperature=0,
-                max_completion_tokens=config.MAX_COMPLETION_TOKENS,
+                toolConfig={"tools": tools},
+                inferenceConfig={"maxTokens": config.MAX_COMPLETION_TOKENS, "temperature": 0},
             )
             tel.llm_calls_total.add(1, {**labels, "outcome": "ok"})
             return resp
-        except _RETRYABLE as e:
+        except NoCredentialsError as e:
             tel.llm_calls_total.add(1, {**labels, "outcome": "error"})
-            if attempt >= config.LLM_RETRIES:
-                raise
+            raise NotConfigured() from e
+        except (ClientError, *_RETRYABLE_TRANSPORT) as e:
+            tel.llm_calls_total.add(1, {**labels, "outcome": "error"})
+            code = e.response["Error"]["Code"] if isinstance(e, ClientError) else type(e).__name__
+            retryable = isinstance(e, _RETRYABLE_TRANSPORT) or code in _RETRYABLE_CODES
+            if not retryable or attempt >= config.LLM_RETRIES:
+                raise LLMError(code) from e
             attempt += 1
             tel.llm_retries_total.add(1, labels)
-            agent_span.add_event("llm.retry", {"attempt": attempt, "error.type": type(e).__name__})
+            agent_span.add_event("llm.retry", {"attempt": attempt, "error.type": code})
             time.sleep(min(2 ** attempt, 8) * 0.5)
-        except openai.APIError:
+        except BotoCoreError as e:
             tel.llm_calls_total.add(1, {**labels, "outcome": "error"})
-            raise
+            raise LLMError(type(e).__name__) from e
+
+
+def _converse_tools(defs):
+    """incident.tool_definitions() (JSON-schema function format) -> Converse toolSpec."""
+    return [{"toolSpec": {"name": d["function"]["name"], "description": d["function"]["description"],
+                          "inputSchema": {"json": d["function"]["parameters"]}}} for d in defs]
 
 
 # --- tool execution -----------------------------------------------------------------
@@ -140,20 +160,16 @@ def _currency_attrs(args):
 
 
 def _execute_tool(session, call, labels):
-    name = call.function.name
-    try:
-        model_args = json.loads(call.function.arguments or "{}")
-        if not isinstance(model_args, dict):
-            raise ValueError("arguments must be a JSON object")
-        parse_error = None
-    except ValueError as e:
-        model_args, parse_error = {}, f"invalid tool arguments JSON: {e}"
+    name, call_id = call.get("name", ""), call.get("toolUseId", "")
+    model_args, parse_error = call.get("input"), None
+    if not isinstance(model_args, dict):
+        model_args, parse_error = {}, "tool input must be a JSON object"
 
     with tracer.start_as_current_span(f"execute_tool {name}") as span:
         span.set_attribute("gen_ai.operation.name", "execute_tool")
         span.set_attribute("gen_ai.tool.name", name)
         span.set_attribute("gen_ai.tool.type", "function")
-        span.set_attribute("gen_ai.tool.call.id", call.id or "")
+        span.set_attribute("gen_ai.tool.call.id", call_id)
         span.set_attribute("prompt.version", labels["prompt.version"])
         tel.stamp_app_attrs(span)
 
@@ -239,15 +255,6 @@ def _record_checkout(session, span, result, value_usd, injected, labels):
 
 
 # --- the agent -------------------------------------------------------------------------
-def _assistant_message(msg):
-    out = {"role": "assistant", "content": msg.content}
-    if msg.tool_calls:
-        out["tool_calls"] = [{"id": c.id, "type": "function",
-                              "function": {"name": c.function.name, "arguments": c.function.arguments}}
-                             for c in msg.tool_calls]
-    return out
-
-
 def run(session, prompt, category, conversation_id):
     version = incident.prompt_version()
     labels = {"prompt.version": version, "app.prompt.category": category}
@@ -256,7 +263,7 @@ def run(session, prompt, category, conversation_id):
         span.set_attribute("gen_ai.operation.name", "invoke_agent")
         span.set_attribute("gen_ai.agent.name", AGENT_NAME)
         span.set_attribute("gen_ai.provider.name", PROVIDER)
-        span.set_attribute("gen_ai.request.model", config.CORTEX_MODEL)
+        span.set_attribute("gen_ai.request.model", config.BEDROCK_MODEL_ID)
         span.set_attribute("gen_ai.conversation.id", conversation_id)
         span.set_attribute("prompt.version", version)
         span.set_attribute("app.prompt.version", version)
@@ -268,9 +275,10 @@ def run(session, prompt, category, conversation_id):
         span.set_attribute("fault.injection.enabled", bool(config.FAULT_INJECTION))
         tel.stamp_app_attrs(span)
 
-        messages = [{"role": "system", "content": incident.system_prompt()}]
-        messages += list(session.history) + [{"role": "user", "content": prompt}]
-        tools = incident.tool_definitions()
+        system = incident.system_prompt()
+        messages = [{"role": m["role"], "content": [{"text": m["content"]}]} for m in session.history if m["content"]]
+        messages.append({"role": "user", "content": [{"text": prompt}]})
+        tools = _converse_tools(incident.tool_definitions())
 
         used, tool_errors, steps = [], 0, 0
         in_tok = out_tok = 0
@@ -278,31 +286,38 @@ def run(session, prompt, category, conversation_id):
         try:
             for steps in range(1, config.MAX_TOOL_STEPS + 1):
                 session.llm_requests += 1
-                resp = _chat(messages, tools, span, labels)
-                if resp.usage:
-                    in_tok += resp.usage.prompt_tokens or 0
-                    out_tok += resp.usage.completion_tokens or 0
-                msg = resp.choices[0].message
-                if not msg.tool_calls:
-                    reply = msg.content or ""
+                resp = _chat(system, messages, tools, span, labels)
+                usage = resp.get("usage") or {}
+                in_tok += usage.get("inputTokens", 0)
+                out_tok += usage.get("outputTokens", 0)
+                msg = resp["output"]["message"]
+                calls = [c["toolUse"] for c in msg.get("content", []) if "toolUse" in c]
+                if not calls:
+                    reply = "".join(c.get("text", "") for c in msg.get("content", []))
                     break
-                messages.append(_assistant_message(msg))
-                for call in msg.tool_calls:
+                messages.append(msg)
+                results = []
+                for call in calls:
                     result = _execute_tool(session, call, labels)
-                    used.append(call.function.name)
-                    tool_errors += "error" in result
-                    messages.append({"role": "tool", "tool_call_id": call.id,
-                                     "content": json.dumps(result, default=str)})
+                    used.append(call.get("name", ""))
+                    failed = "error" in result
+                    tool_errors += failed
+                    # Converse wants every toolResult for one turn in a single user message.
+                    results.append({"toolResult": {"toolUseId": call.get("toolUseId", ""),
+                                                   "content": [{"json": result}],
+                                                   "status": "error" if failed else "success"}})
+                messages.append({"role": "user", "content": results})
             else:
                 outcome = "max_steps"
                 reply = "I couldn't finish that within my step limit. Could you try a simpler request?"
         except NotConfigured:
-            outcome, reply = "not_configured", "The shopping assistant is not configured yet (missing Cortex credentials)."
+            outcome, reply = "not_configured", "The shopping assistant is not configured yet (no AWS credentials or Bedrock model)."
         except RateLimited:
             outcome, reply = "rate_limited", "I'm getting a lot of requests right now. Please try again in a moment."
-        except openai.APIError as e:
+        except LLMError as e:
             outcome = "llm_error"
             span.record_exception(e)
+            span.set_attribute("error.type", str(e))
             reply = "Sorry, I couldn't reach my language model just now. Please try again."
 
         if outcome == "ok" and tool_errors:
@@ -326,7 +341,7 @@ def run(session, prompt, category, conversation_id):
         for direction, n in (("input", in_tok), ("output", out_tok)):
             if n:
                 tel.tokens_total.add(n, {"prompt.version": version, "direction": direction,
-                                         "gen_ai.request.model": config.CORTEX_MODEL})
+                                         "gen_ai.request.model": config.BEDROCK_MODEL_ID})
         tel.event("assistant.request.completed", **{
             "app.session.id": session.id, "app.customer.id": session.id,
             "app.prompt.category": category, "prompt.version": version,

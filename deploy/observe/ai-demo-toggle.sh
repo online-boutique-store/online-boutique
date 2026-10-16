@@ -25,7 +25,7 @@ case "${1:-}" in
   v1|v2)      kubectl -n "$NS" set env "$DEP" PROMPT_VERSION="$1" ;;
   inject-on)  kubectl -n "$NS" set env "$DEP" FAULT_INJECTION=force_malformed_currency ;;
   inject-off) kubectl -n "$NS" set env "$DEP" FAULT_INJECTION= ;;
-  status)     kubectl -n "$NS" set env "$DEP" --list | grep -E '^(PROMPT_VERSION|FAULT_INJECTION|CORTEX_MODEL)=' || true
+  status)     kubectl -n "$NS" set env "$DEP" --list | grep -E '^(PROMPT_VERSION|FAULT_INJECTION|BEDROCK_MODEL_ID|AWS_REGION)=' || true
               kubectl -n "$NS" get cm shopping-assistant-config -o jsonpath='{.data}' ; echo ;;
   *) echo "usage: $0 {v1|v2|inject-on|inject-off|status}" >&2; exit 2 ;;
 esac

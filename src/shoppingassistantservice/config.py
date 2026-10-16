@@ -9,12 +9,18 @@ def _int(name, default):
         return default
 
 
-# --- Snowflake Cortex (OpenAI-compatible Chat Completions) -----------------
-# e.g. https://<account>.snowflakecomputing.com/api/v2/cortex/v1
-CORTEX_BASE_URL = os.environ.get("CORTEX_BASE_URL", "").rstrip("/")
-CORTEX_PAT = os.environ.get("CORTEX_PAT", "")
-CORTEX_MODEL = os.environ.get("CORTEX_MODEL", "claude-sonnet-4-5")
-CORTEX_TIMEOUT_S = _int("CORTEX_TIMEOUT_S", 60)
+# --- Amazon Bedrock (Converse API) ------------------------------------------
+# Credentials come from the standard AWS chain (EKS Pod Identity / IRSA in the
+# cluster, your local profile when testing) - never from this file or env vars
+# set here. BEDROCK_MODEL_ID must be a model or inference-profile ID your
+# account has access to; the default is a US cross-region inference profile and
+# is NOT verified against any account. Confirm with:
+#   aws bedrock list-inference-profiles
+AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
+BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+# Only for local fakes/tests; leave unset in real deployments.
+BEDROCK_ENDPOINT_URL = os.environ.get("BEDROCK_ENDPOINT_URL") or None
+BEDROCK_TIMEOUT_S = _int("BEDROCK_TIMEOUT_S", 60)
 
 # --- Cost controls ----------------------------------------------------------
 MAX_TOOL_STEPS = _int("MAX_TOOL_STEPS", 5)
@@ -43,5 +49,5 @@ GRPC_TIMEOUT_S = _int("GRPC_TIMEOUT_S", 15)
 PORT = _int("PORT", 8080)
 
 
-def cortex_configured():
-    return bool(CORTEX_BASE_URL and CORTEX_PAT)
+def bedrock_configured():
+    return bool(BEDROCK_MODEL_ID and AWS_REGION)

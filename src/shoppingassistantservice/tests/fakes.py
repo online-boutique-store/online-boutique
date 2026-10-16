@@ -1,7 +1,7 @@
-"""Local end-to-end test harness. NOT a Cortex test.
+"""Local end-to-end test harness. NOT a Bedrock test.
 
-Fake pieces (all labelled, none of this validates Cortex or the real services):
-  - FakeCortex: an OpenAI chat-completions server with scripted tool-calling.
+Fake pieces (all labelled, none of this validates Bedrock or the real services):
+  - FakeBedrock: a Bedrock Converse server with scripted tool use.
   - Fake gRPC backends: catalog / cart / currency / checkout built from the same
     generated stubs. The fake currency + checkout reproduce the REAL contract we
     verified in src/currencyservice (INVALID_ARGUMENT on unsupported code).
@@ -110,11 +110,12 @@ def start_backends():
     os.environ["CHECKOUT_SERVICE_ADDR"] = addrs["CHECKOUT"]
 
 
-# --------------------------------------------------------------------- fake Cortex
-class FakeCortex(BaseHTTPRequestHandler):
-    """Scripted 'model'. Decides tool calls from the latest user text and the
-    tool schema it was given, so v1/v2 prompt text really changes its argument -
-    but this is a SCRIPT standing in for a model, not evidence about Cortex."""
+# -------------------------------------------------------------------- fake Bedrock
+class FakeBedrock(BaseHTTPRequestHandler):
+    """Scripted 'model' speaking the Bedrock Converse wire format. Decides tool calls
+    from the latest user text and the tool schema it was given, so v1/v2 prompt text
+    really changes its argument - but this is a SCRIPT standing in for a model, not
+    evidence about Bedrock or Claude."""
     requests = []
 
     def log_message(self, *a):
@@ -122,36 +123,38 @@ class FakeCortex(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        FakeCortex.requests.append(body)
+        FakeBedrock.requests.append(body)
         msgs = body["messages"]
-        user = [m for m in msgs if m["role"] == "user"][-1]["content"].lower()
-        last = msgs[-1]
-        tools = {t["function"]["name"]: t["function"] for t in body.get("tools", [])}
+        last = msgs[-1]["content"]
+        user_texts = [c["text"] for m in msgs if m["role"] == "user" for c in m["content"] if "text" in c]
+        user = user_texts[-1].lower()
+        tools = {t["toolSpec"]["name"]: t["toolSpec"] for t in body.get("toolConfig", {}).get("tools", [])}
 
         def call(name, args, cid):
-            return {"role": "assistant", "content": None, "tool_calls": [{"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}, "tool_calls"
+            return [{"toolUse": {"toolUseId": cid, "name": name, "input": args}}], "tool_use"
 
-        if last["role"] == "tool":
-            data = json.loads(last["content"])
+        results = [c["toolResult"] for c in last if "toolResult" in c]
+        if results:
+            data = results[0]["content"][0]["json"]
             if "error" in data:
-                msg, fr = {"role": "assistant", "content": "Sorry, that failed: " + data["error"]}, "stop"
+                content, stop = [{"text": "Sorry, that failed: " + data["error"]}], "end_turn"
             elif "order_id" in data:
-                msg, fr = {"role": "assistant", "content": f"Order {data['order_id']} placed."}, "stop"
+                content, stop = [{"text": f"Order {data['order_id']} placed."}], "end_turn"
             elif "results" in data:
-                msg, fr = {"role": "assistant", "content": "I found Mug [6E92ZMYYFZ]."}, "stop"
+                content, stop = [{"text": "I found Mug [6E92ZMYYFZ]."}], "end_turn"
             else:
-                msg, fr = {"role": "assistant", "content": "Done."}, "stop"
+                content, stop = [{"text": "Done."}], "end_turn"
         elif "check out" in user or "checkout" in user:
-            v2 = "written the way the customer said it" in tools["place_order"]["parameters"]["properties"]["currency_code"]["description"]
-            code = "Japanese Yen" if v2 else "JPY"   # scripted model behaviour per prompt version
-            msg, fr = call("place_order", {"currency_code": code}, "call_co")
+            desc = tools["place_order"]["inputSchema"]["json"]["properties"]["currency_code"]["description"]
+            code = "Japanese Yen" if "written the way the customer said it" in desc else "JPY"
+            content, stop = call("place_order", {"currency_code": code}, "tu_co")
         elif "add" in user:
-            msg, fr = call("add_to_cart", {"product_id": "6E92ZMYYFZ", "quantity": 2}, "call_add")
+            content, stop = call("add_to_cart", {"product_id": "6E92ZMYYFZ", "quantity": 2}, "tu_add")
         else:
-            msg, fr = call("search_products", {"query": "mug"}, "call_s")
-        out = {"id": "chatcmpl-fake", "object": "chat.completion", "created": 1, "model": body["model"],
-               "choices": [{"index": 0, "message": msg, "finish_reason": fr}],
-               "usage": {"prompt_tokens": 120, "completion_tokens": 20, "total_tokens": 140}}
+            content, stop = call("search_products", {"query": "mug"}, "tu_s")
+        out = {"output": {"message": {"role": "assistant", "content": content}}, "stopReason": stop,
+               "usage": {"inputTokens": 120, "outputTokens": 20, "totalTokens": 140},
+               "metrics": {"latencyMs": 3}}
         data = json.dumps(out).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -160,8 +163,12 @@ class FakeCortex(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def start_fake_cortex():
-    srv = HTTPServer(("127.0.0.1", 0), FakeCortex)
+def start_fake_bedrock():
+    srv = HTTPServer(("127.0.0.1", 0), FakeBedrock)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    os.environ["CORTEX_BASE_URL"] = f"http://127.0.0.1:{srv.server_port}/v1"
-    os.environ["CORTEX_PAT"] = "fake-token-not-a-secret"
+    os.environ["BEDROCK_ENDPOINT_URL"] = f"http://127.0.0.1:{srv.server_port}"
+    os.environ["AWS_REGION"] = "us-west-2"
+    # Dummy, non-secret values so botocore can sign requests to the local fake.
+    os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+    os.environ.pop("AWS_PROFILE", None)

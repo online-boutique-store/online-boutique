@@ -2,106 +2,144 @@
 
 ## What This Demonstrates
 
-The shopping assistant is a Python Flask agent that uses Snowflake Cortex through the OpenAI-compatible Chat Completions API. The default model is `claude-sonnet-4-5`; all model inference remains inside Snowflake.
+The shopping assistant is a Python Flask agent that calls Claude on **Amazon Bedrock** through the Converse API. It runs real tool calls against the existing Online Boutique gRPC services. The default model is the US cross-region inference profile `us.anthropic.claude-sonnet-4-5-20250929-v1:0`, which hasn't yet been checked against your account.
 
-The trace should follow:
+A trace runs:
 
-`frontend /bot` -> `invoke_agent` -> Cortex `chat` -> `execute_tool` -> Online Boutique gRPC services
+`frontend /bot` -> `invoke_agent shopping_assistant` -> `chat <model>` -> `execute_tool <name>` -> Online Boutique gRPC services
 
-The assistant supports product search, product lookup, currency conversion, cart operations, and checkout.
+The tools are `search_products`, `get_product`, `convert_price`, `add_to_cart`, `get_cart`, and `place_order`.
+
+## AWS Setup (needs approval: creates IAM resources)
+
+The pod uses **no static AWS keys**. It gets credentials from its Kubernetes ServiceAccount `shoppingassistantservice` through the standard AWS chain.
+
+1. Confirm which models your account can use, and pick a model or inference-profile ID:
+
+   ```bash
+   aws bedrock list-inference-profiles --query 'inferenceProfileSummaries[?contains(inferenceProfileId, `claude`)].inferenceProfileId'
+   ```
+
+   If it isn't the default, set `BEDROCK_MODEL_ID` in `deploy/observe-skaffold/kustomization.yaml`. Also set `AWS_REGION` to the region where you invoke Bedrock.
+
+2. Create an IAM role that holds `deploy/observe/bedrock-invoke-policy.json`. Replace `<ACCOUNT_ID>` in that file, and update the model ARNs if you changed models.
+
+3. Bind the role to the pod. Use one of these two options:
+   - **EKS Pod Identity** (preferred). The cluster must have the `eks-pod-identity-agent` add-on.
+
+     ```bash
+     aws eks create-pod-identity-association --cluster-name <cluster> \
+       --namespace <namespace> --service-account shoppingassistantservice \
+       --role-arn arn:aws:iam::<ACCOUNT_ID>:role/<bedrock-invoke-role>
+     ```
+
+     The role's trust policy must allow `pods.eks.amazonaws.com`.
+
+   - **IRSA**. Uncomment the `eks.amazonaws.com/role-arn` annotation on the ServiceAccount in `deploy/observe-skaffold/shoppingassistantservice.yaml`. The role trusts the cluster's OIDC provider.
+
+4. EKS egress must reach `bedrock-runtime.<region>.amazonaws.com`, either over NAT or through a VPC endpoint.
 
 ## Configuration
 
-Create the Cortex secret in the target namespace without committing the PAT:
+These values live in the generated `shopping-assistant-config` ConfigMap:
 
-```bash
-CORTEX_ACCOUNT_URL=https://<account>.snowflakecomputing.com \
-  ./deploy/observe/create-cortex-secret.sh
-```
-
-The PAT's default role needs Cortex REST API access, such as `SNOWFLAKE.CORTEX_REST_API_USER` or `SNOWFLAKE.CORTEX_USER`. Use a dedicated demo account and role, not a corporate credential.
-
-The service uses these defaults:
-
-- `CORTEX_MODEL=claude-sonnet-4-5`
+- `BEDROCK_MODEL_ID`
+- `AWS_REGION`
 - `PROMPT_VERSION=v1`
 - `FAULT_INJECTION=`
 - `MAX_TOOL_STEPS=5`
 - `MAX_COMPLETION_TOKENS=1024`
-- `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY`
+- `RATE_LIMIT_RPM=30`
+- `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`
 
-`SPAN_ONLY` is intentional. The OTel OpenAI instrumentation does not treat `true` as a valid content-capture value; that setting falls back to `NO_CONTENT`.
+Content capture must be the literal `true`. I verified that the botocore Bedrock instrumentation ignores `SPAN_ONLY`. With `true`, prompts and responses are recorded in two places:
+
+- **On the `chat` span** as OTel semconv `gen_ai.input.messages` and `gen_ai.output.messages`, including tool-call names and arguments. The service adds these through botocore hooks, because the official instrumentation does not put content on spans.
+- **As OTel log events** named `gen_ai.user.message`, `gen_ai.choice`, and so on. The official instrumentation emits these.
+
+## Deploy (needs approval)
+
+```bash
+aws ecr get-login-password --region us-west-2 \
+  | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com
+echo "OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production,deployment.environment.name=production,service.version=$(git rev-parse --short HEAD)" \
+  > deploy/observe-skaffold/service-version.env
+skaffold run --default-repo=<ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/online-boutique --namespace=<namespace>
+```
+
+`ai-demo-toggle.sh` defaults to the `online-boutique` namespace, so pass `NAMESPACE=<namespace>` if yours differs.
 
 ## Demo Sequence
 
-1. Deploy the Observe/Skaffold overlay after confirming the target EKS cluster, namespace, AWS account, and ECR repository.
-2. Open the storefront and select the assistant, or send a request to `/bot` through the frontend.
-3. Ask: `Find me a mug under $50.`
-4. In Observe, inspect the trace for the frontend request. Confirm the `invoke_agent`, Cortex `chat`, `execute_tool search_products`, and Product Catalog spans share one trace.
-5. Confirm the chat span contains `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.request.model`, and token usage.
-6. Run a checkout conversation using a currency name, such as `Please check out in Japanese Yen.`
-7. Enable the prompt-regression configuration:
+1. Open the storefront's assistant page and ask `Find me a mug under $50.`
+2. In Observe, open that trace. Confirm `invoke_agent`, `chat`, `execute_tool search_products`, and the ProductCatalogService spans share one trace.
+3. On the `chat` span, show the model, the `gen_ai.usage.*` tokens, and `gen_ai.input.messages`/`gen_ai.output.messages` with the tool call.
+4. Run a checkout conversation: `Add two to my cart`, then `Please check out in Japanese Yen.`
+5. Enable the prompt regression:
 
-```bash
-./deploy/observe/ai-demo-toggle.sh v2
-```
+   ```bash
+   ./deploy/observe/ai-demo-toggle.sh v2
+   ```
 
-8. Generate checkout traffic. `v2` changes the currency tool description to encourage natural-language currency values. Whether Claude emits an invalid value is model-dependent and must be verified live.
-9. If the real model does not reproduce the failure reliably, enable the explicitly synthetic fallback:
+   `v2` tells the model to pass currencies the way the customer said them. Whether Claude actually sends `"Japanese Yen"` is the model's own decision, and it **has not been verified live**.
 
-```bash
-./deploy/observe/ai-demo-toggle.sh inject-on
-```
+6. If `v2` doesn't fail reliably, use the explicitly synthetic fallback:
 
-The fallback rewrites the model's ISO code after the model response. It records `fault.injected=true`, `fault.names`, `app.tool.args_source=synthetic_fault_injection`, and preserves the original model arguments. Do not describe this as an independently generated model decision.
+   ```bash
+   ./deploy/observe/ai-demo-toggle.sh inject-on
+   ```
 
-10. Investigate the failed checkout from the `execute_tool place_order` span through Checkout and Currency Service. The invalid currency is rejected as `INVALID_ARGUMENT`; the checkout returns a failure rather than claiming success.
-11. Compare `ai.checkout.value_usd`, failed attempts, retries, and recovered value. Failed value is at-risk value, not confirmed lost revenue.
-12. Restore healthy behavior:
+   This rewrites the model's ISO code after the model returns it. It labels the span with `fault.injected=true`, `fault.names`, and `app.tool.args_source=synthetic_fault_injection`, and keeps the model's original arguments. Don't present it as a model decision.
 
-```bash
-./deploy/observe/ai-demo-toggle.sh inject-off
-./deploy/observe/ai-demo-toggle.sh v1
-```
+7. Investigate the failure:
+   - Follow `execute_tool place_order` (ERROR) -> `CheckoutService/PlaceOrder` (INTERNAL) -> `CurrencyService/Convert` (`INVALID_ARGUMENT: unsupported currency code`).
+   - Filter on `app.tool.currency_valid=false` and group by `prompt.version`.
 
-13. Generate another checkout and confirm recovery. A later success in the same session records recovered value.
+8. Show the business impact:
+   - `ai.checkout.attempts` by outcome and `prompt.version`.
+   - `ai.checkout.value_usd` with outcome=failed. This is at-risk value, not confirmed lost revenue.
+   - `ai.checkout.retries`.
+   - `ai.checkout.recovered_value_usd`.
+
+9. Restore:
+
+   ```bash
+   ./deploy/observe/ai-demo-toggle.sh inject-off
+   ./deploy/observe/ai-demo-toggle.sh v1
+   ```
+
+   Then check out again and confirm it recovers. A later success in the same session records recovered value.
 
 ## Synthetic Traffic
 
-The Locust assistant user sends templated prompts and does not use an LLM to generate traffic. This avoids extra Cortex calls. It preserves a fixed customer cookie and conversation ID across turns.
+The Locust `AssistantUser` writes its prompts from templates, so the only Bedrock spend is the assistant's own replies. Each conversation keeps one customer cookie and one conversation ID across turns. Failed checkouts trigger "why didn't it work?" and retry follow-ups.
 
-The default load split is nine storefront users to one assistant user. Relevant controls include:
+With the default `USERS=10`, the weights produce one assistant user to nine storefront users. You can tune it with these settings:
 
-- `ASSISTANT_USERS_WEIGHT`
-- `ASSISTANT_SCENARIOS`, for example `browse=28,checkout=24,cart=12`
+- `ASSISTANT_USERS_WEIGHT` (set to 0 to disable)
+- `ASSISTANT_SCENARIOS`
 - `ASSISTANT_MAX_TURNS`
-- `ASSISTANT_THINK_MIN` and `ASSISTANT_THINK_MAX`
-- `ASSISTANT_GAP_MIN` and `ASSISTANT_GAP_MAX`
-- `ASSISTANT_WHY_PROB` and `ASSISTANT_RETRY_PROB`
+- `ASSISTANT_THINK_MIN`/`MAX`
+- `ASSISTANT_GAP_MIN`/`MAX`
+- `ASSISTANT_WHY_PROB`
+- `ASSISTANT_RETRY_PROB`
 
-The assistant traffic includes browsing, comparisons, currency conversion, cart operations, checkout, support, off-topic prompts, and synthetic prompt-injection attempts.
+## Validation Status
 
-## Local Validation
+**Verified locally** with `python tests/test_agent_local.py` in `src/shoppingassistantservice`, which reports `ALL PASSED`. The harness drives the real `boto3` Converse client and botocore instrumentation against a fake Bedrock server and fake gRPC services. It checks:
 
-The local agent harness uses a fake Cortex HTTP server and fake gRPC services. It validates tool execution, trace parenting, baggage propagation, prompt capture, metrics, error handling, and synthetic fault labels. It does not validate live Cortex access or real EKS services.
+- Trace parenting and baggage propagation.
+- Content on the chat span.
+- The v2 bad argument labelled as the model's own decision.
+- Fault-injection labelling.
+- Honest failure reporting.
+- Business metrics.
+- The no-credentials case returning 503.
 
-```bash
-cd src/shoppingassistantservice
-python tests/test_agent_local.py
-```
+**Not yet verified:**
 
-The resolved dependency set was tested with `pip check`. The frontend compiles with `go build ./...` and the checkout service passes `go vet ./...`.
-
-## EKS and ECR Deployment
-
-Deployment is intentionally not automatic. Before applying anything:
-
-1. Confirm the AWS account, region, EKS cluster, namespace, and IAM permissions.
-2. Create or select the ECR repository for `shoppingassistantservice` and verify repositories for any changed images.
-3. Authenticate Docker to ECR.
-4. Generate `deploy/observe-skaffold/service-version.env` using the current Git short SHA.
-5. Build and push with Skaffold using the correct ECR default repository.
-6. Render and inspect the manifests, especially image references and the Cortex Secret reference.
-7. Request explicit approval before applying to EKS.
-
-The local environment did not have a running Docker daemon, and cluster operations were not performed. Cortex REST tool-calling and Observe AI-specific ingestion remain pending live validation with a dedicated demo PAT and an approved EKS deployment.
+- Bedrock model access and the model ID in your account.
+- Claude's real behaviour under `v2`.
+- The IAM and Pod Identity binding.
+- EKS deployment, and that Observe ingests and recognizes the GenAI attributes.
+- The real Node currencyservice marking its server span ERROR. Source reading says it will.

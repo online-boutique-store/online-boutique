@@ -1,4 +1,4 @@
-"""Shopping assistant service (Snowflake Cortex tool-calling agent).
+"""Shopping assistant service (Amazon Bedrock tool-calling agent).
 
 Contract with the frontend is unchanged: POST / {message, ...} -> {content, ...}.
 Optional request fields: session_id, prompt_category, conversation_id. The same
@@ -60,7 +60,8 @@ def chat():
 
 if __name__ == "__main__":
     tel.event("assistant.starting", **{
-        "cortex.configured": config.cortex_configured(), "cortex.model": config.CORTEX_MODEL,
+        "llm.provider": "aws.bedrock", "bedrock.model_id": config.BEDROCK_MODEL_ID,
+        "aws.region": config.AWS_REGION,
         "prompt.version": config.PROMPT_VERSION, "telemetry.exporting": exporting,
         "fault.injection": sorted(config.FAULT_INJECTION)})
     app.run(host="0.0.0.0", port=config.PORT, threaded=True)

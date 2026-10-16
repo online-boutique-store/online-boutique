@@ -1,6 +1,6 @@
 """Run: python tests/test_agent_local.py   (from src/shoppingassistantservice)
 
-Exercises the full agent path against FAKE Cortex + FAKE gRPC backends. See
+Exercises the full agent path against FAKE Bedrock + FAKE gRPC backends. See
 fakes.py for exactly what is and is not being validated.
 """
 import json
@@ -8,8 +8,8 @@ import logging
 import os
 import sys
 
-os.environ["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = "SPAN_ONLY"
-os.environ["OTEL_SEMCONV_STABILITY_OPT_IN"] = "gen_ai_latest_experimental"
+# The botocore Bedrock instrumentation only accepts the literal "true" (verified).
+os.environ["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = "true"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.dirname(HERE)]
 
@@ -30,7 +30,7 @@ metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
 import fakes
 
 fakes.start_backends()
-fakes.start_fake_cortex()
+fakes.start_fake_bedrock()
 
 import config
 import shoppingassistantservice as svc
@@ -80,7 +80,7 @@ def metric_points(name):
 
 SID = "c1a1f2b0-0001-4a4a-9c1a-1a2b3c4d5e01"
 
-# ---- A: browse -> Cortex -> catalog tool -> backend -> reply (the mandatory checkpoint)
+# ---- A: browse -> Bedrock -> catalog tool -> backend -> reply (the mandatory checkpoint)
 code, body, spans = ask(SID, "Find me a mug under $50", "browse")
 agent = by_name(spans, "invoke_agent")[0]
 tool = by_name(spans, "execute_tool search_products")[0]
@@ -99,9 +99,12 @@ check(a["gen_ai.operation.name"] == "invoke_agent" and a["gen_ai.agent.name"] ==
 check(a["prompt.version"] == "v1" and a["app.prompt.category"] == "browse" and a["app.session.id"] == SID and a["app.customer.id"] == SID, "A agent span app.* + prompt.version")
 check(a["gen_ai.usage.input_tokens"] == 240 and a["gen_ai.usage.output_tokens"] == 40, "A tokens summed across both LLM calls")
 c0 = chats[0].attributes
-check(c0.get("gen_ai.request.model") == "claude-sonnet-4-5" and c0.get("gen_ai.usage.input_tokens") == 120, "A chat span model + usage")
-check("find me a mug" in c0.get("gen_ai.input.messages", "").lower(), "A chat span captured prompt content (SPAN_ONLY)")
-check("search_products" in chats[0].attributes.get("gen_ai.output.messages", ""), "A chat span captured tool_call selection")
+check(c0.get("gen_ai.request.model") == config.BEDROCK_MODEL_ID and c0.get("gen_ai.usage.input_tokens") == 120, "A chat span model + usage")
+check(c0.get("gen_ai.provider.name") == "aws.bedrock", "A chat span gen_ai.provider.name=aws.bedrock (hook)")
+check(chats[0].kind == trace.SpanKind.CLIENT, "A chat span is a CLIENT span")
+check("find me a mug" in c0.get("gen_ai.input.messages", "").lower(), "A chat span captured prompt content (hook)")
+check('"tool_call"' in c0.get("gen_ai.output.messages", "") and "search_products" in c0.get("gen_ai.output.messages", ""), "A chat span captured tool_call selection")
+check("tool_call_response" in chats[1].attributes.get("gen_ai.input.messages", ""), "A 2nd chat span carries the tool result in its input")
 check(tool.attributes["gen_ai.tool.name"] == "search_products" and '"query": "mug"' in tool.attributes["gen_ai.tool.call.arguments"], "A tool span name + arguments")
 check("6E92ZMYYFZ" in tool.attributes["gen_ai.tool.call.result"], "A tool span result")
 check(any(b.get("app.session.id") == SID and b.get("app.customer.id") == SID for b in fakes.SEEN_BAGGAGE), "A baggage reached backend")
@@ -173,10 +176,17 @@ check(any(r.getMessage() == "checkout.attempt" and r.fields["checkout.outcome"] 
 code, body, _ = ask("x", "")
 check(code == 400, "empty message -> 400")
 config.PROMPT_VERSION = "v1"
-os.environ["CORTEX_PAT"] = ""
-config.CORTEX_PAT = ""
+import agent
+import boto3
+agent._client["c"] = None
+boto3.DEFAULT_SESSION = None  # boto3 caches resolved credentials on its default session
+for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+    os.environ.pop(k, None)
+os.environ["AWS_SHARED_CREDENTIALS_FILE"] = os.devnull  # isolate from the developer's real AWS config
+os.environ["AWS_CONFIG_FILE"] = os.devnull
+os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
 code, body, _ = ask("y", "hello")
-check(code == 503 and body["details"]["outcome"] == "not_configured", "missing PAT -> 503 not_configured")
+check(code == 503 and body["details"]["outcome"] == "not_configured", "no AWS credentials -> 503 not_configured")
 
 print()
 print("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}")

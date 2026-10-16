@@ -110,15 +110,76 @@ def init(flask_app):
     set_global_textmap(CompositePropagator([TraceContextTextMapPropagator(), W3CBaggagePropagator()]))
 
     # Even when exporting is off these are harmless no-ops against the API tracer.
+    from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
     from opentelemetry.instrumentation.flask import FlaskInstrumentor
     from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
-    from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
 
     FlaskInstrumentor().instrument_app(flask_app, excluded_urls="healthz")
     GrpcInstrumentorClient().instrument()
-    OpenAIInstrumentor().instrument()
+    # Botocore instruments Bedrock Converse as a `chat <model>` span with model +
+    # token usage. It only emits prompt/response content as gen_ai.* LOG events
+    # (when OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true), never as span
+    # attributes - so the hooks below also put semconv messages on the span itself.
+    BotocoreInstrumentor().instrument(request_hook=_bedrock_request_hook,
+                                      response_hook=_bedrock_response_hook)
     _configure_logging(otlp_logs)
     return enabled
+
+
+# --- Bedrock chat span enrichment ---------------------------------------------
+_MAX_MSG_ATTR = 8000
+
+
+def _content_enabled():
+    return os.environ.get("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "").strip().lower() == "true"
+
+
+def _parts(blocks):
+    """Converse content blocks -> OTel GenAI semconv message parts."""
+    out = []
+    for b in blocks or []:
+        if "text" in b:
+            out.append({"type": "text", "content": b["text"]})
+        elif "toolUse" in b:
+            t = b["toolUse"]
+            out.append({"type": "tool_call", "id": t.get("toolUseId"), "name": t.get("name"),
+                        "arguments": t.get("input")})
+        elif "toolResult" in b:
+            t = b["toolResult"]
+            out.append({"type": "tool_call_response", "id": t.get("toolUseId"),
+                        "response": [c.get("json", c.get("text")) for c in t.get("content", [])]})
+    return out
+
+
+def _json_attr(value):
+    s = json.dumps(value, default=str)
+    return s if len(s) <= _MAX_MSG_ATTR else s[:_MAX_MSG_ATTR] + "...[truncated]"
+
+
+def _is_converse(service_name, operation_name):
+    return service_name == "bedrock-runtime" and operation_name == "Converse"
+
+
+def _bedrock_request_hook(span, service_name, operation_name, api_params):
+    if not (_is_converse(service_name, operation_name) and span.is_recording()):
+        return
+    span.set_attribute("gen_ai.provider.name", "aws.bedrock")
+    if not _content_enabled():
+        return
+    msgs = [{"role": "system", "parts": _parts(api_params.get("system"))}] if api_params.get("system") else []
+    msgs += [{"role": m.get("role"), "parts": _parts(m.get("content"))} for m in api_params.get("messages", [])]
+    span.set_attribute("gen_ai.input.messages", _json_attr(msgs))
+
+
+def _bedrock_response_hook(span, service_name, operation_name, result):
+    if not (_is_converse(service_name, operation_name) and span.is_recording()):
+        return
+    if not _content_enabled():
+        return
+    msg = (result or {}).get("output", {}).get("message") or {}
+    span.set_attribute("gen_ai.output.messages", _json_attr(
+        [{"role": msg.get("role", "assistant"), "parts": _parts(msg.get("content")),
+          "finish_reason": (result or {}).get("stopReason")}]))
 
 
 # --- structured logging with trace correlation -------------------------------

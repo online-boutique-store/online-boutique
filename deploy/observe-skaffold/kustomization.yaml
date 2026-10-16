@@ -48,7 +48,7 @@ kind: Kustomization
 
 resources:
   - ../../kubernetes-manifests # bare `image: <service>` names — Skaffold resolves these
-  - shoppingassistantservice.yaml # Cortex agent; needs the `cortex-credentials` Secret (see docs/ai-demo.md)
+  - shoppingassistantservice.yaml # Bedrock agent; pod needs an IAM role with Bedrock access (see docs/ai-demo.md)
 
 patches:
   - path: patches/frontend.yaml
@@ -95,13 +95,16 @@ configMapGenerator:
     literals:
       - PROMPT_VERSION=v1
       - FAULT_INJECTION=
-      - CORTEX_MODEL=claude-sonnet-4-5
+      # Must be a model/inference-profile ID enabled in the target AWS account
+      # and region - NOT verified against any account yet.
+      - BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      - AWS_REGION=us-west-2
       - MAX_TOOL_STEPS=5
       - MAX_COMPLETION_TOKENS=1024
       - RATE_LIMIT_RPM=30
-      # The instrumentation only accepts SPAN_ONLY / EVENT_ONLY / SPAN_AND_EVENT;
-      # "true" is silently treated as NO_CONTENT (verified).
-      - OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY
+      # The botocore Bedrock instrumentation only accepts the literal "true"
+      # (unlike the OpenAI one); "SPAN_ONLY" silently disables content (verified).
+      - OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
 
 labels:
   - pairs:
