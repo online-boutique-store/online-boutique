@@ -164,3 +164,68 @@ button[disabled]{
 @keyframes shimmer {
   100% {-webkit-mask-position:left}
 }
+
+/* Auto-opening assistant popup (assistant_widget.html) */
+.ai-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1040;
+}
+
+.ai-popup {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(720px, 94vw);
+  height: min(680px, 88vh);
+  background-color: #EEE;
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  z-index: 1050;
+}
+
+.ai-popup[hidden], .ai-backdrop[hidden], .ai-launcher[hidden] {
+  display: none;
+}
+
+.ai-popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: white;
+  font-weight: 600;
+  border-bottom: 1px solid #DDD;
+}
+
+.ai-popup .bot-messages {
+  height: calc(100% - 150px);
+}
+
+.ai-close {
+  border: none;
+  background: transparent;
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+  color: #5F6368;
+}
+
+.ai-launcher {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border: none;
+  border-radius: 28px;
+  background: white;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  z-index: 1030;
+}

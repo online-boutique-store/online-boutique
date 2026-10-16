@@ -1,0 +1,167 @@
+{{ define "assistant_widget" }}
+
+<div id="ai-backdrop" class="ai-backdrop" hidden></div>
+<button id="ai-launcher" class="ai-launcher" type="button" aria-label="Open shopping assistant" hidden>
+  <img src="{{ $.baseUrl }}/static/icons/Hipster_WandIcon.svg" alt="" style="width: 24px; height: 24px;" />
+  <span>Ask the assistant</span>
+</button>
+
+<div id="ai-popup" class="ai-popup" role="dialog" aria-modal="true" aria-label="Cymbal Shops assistant" hidden>
+  <div class="ai-popup-header">
+    <span>Cymbal Shops assistant</span>
+    <button id="ai-close" class="ai-close" type="button" aria-label="Close assistant">&times;</button>
+  </div>
+  <div id="bot-messages" class="bot-messages">
+    <p class="bot-message">
+      <span class="bot-message-text">Hi, I'm the Cymbal Shops assistant. I can help you find products, convert prices, manage your cart, and check out.</span>
+    </p>
+    <p class="bot-message">
+      <span class="bot-message-text">What can I help you with?</span>
+    </p>
+  </div>
+  <div class="bot-input">
+    <input id="bot-input-text" type="text" style="margin-right: 30px;" class="bot-input-text" placeholder="Recommend me items...">
+    <button id="bot-input-button" class="bot-input-button">Send</button>
+  </div>
+</div>
+
+<script>
+  (function () {
+    const baseUrl = "{{ $.baseUrl }}";
+    const popup = document.getElementById("ai-popup");
+    const backdrop = document.getElementById("ai-backdrop");
+    const launcher = document.getElementById("ai-launcher");
+    const closeBtn = document.getElementById("ai-close");
+    const botMessages = document.getElementById("bot-messages");
+    const botbutton = document.getElementById("bot-input-button");
+    const botinput = document.getElementById("bot-input-text");
+    const STORE = "ai-transcript";
+    const SEEN = "ai-popup-seen";
+
+    function openPopup() {
+      popup.hidden = false;
+      backdrop.hidden = false;
+      launcher.hidden = true;
+      sessionStorage.setItem(SEEN, "1");
+      botMessages.scrollTo(0, botMessages.scrollHeight);
+      botinput.focus();
+    }
+
+    function closePopup() {
+      popup.hidden = true;
+      backdrop.hidden = true;
+      launcher.hidden = false;
+    }
+
+    function save() {
+      try { sessionStorage.setItem(STORE, botMessages.innerHTML); } catch (e) {}
+    }
+
+    function extractIdsFromString(message) {
+      return Array.from(message.matchAll(/\[([a-zA-Z0-9-]+)\]/g), (m) => m[1]);
+    }
+
+    function addUserMessage(text) {
+      const p = document.createElement("p");
+      p.classList.add("user-message");
+      const span = document.createElement("span");
+      span.classList.add("user-message-text");
+      span.innerText = text;
+      p.appendChild(span);
+      botMessages.appendChild(p);
+    }
+
+    async function handleSend() {
+      const message = botinput.value;
+      if (!message || !message.trim()) {
+        return;
+      }
+      addUserMessage(message);
+      botinput.value = "";
+      botbutton.disabled = true;
+      botinput.disabled = true;
+
+      const botMessage = document.createElement("p");
+      botMessage.classList.add("bot-message", "bot-message-loading");
+      const botMessageSpan = document.createElement("span");
+      botMessageSpan.classList.add("bot-message-text");
+      botMessage.appendChild(botMessageSpan);
+      botMessages.appendChild(botMessage);
+      botMessages.scrollTo(0, botMessages.scrollHeight);
+
+      let text;
+      try {
+        const response = await fetch(baseUrl + "/bot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: message }),
+        });
+        const responseJson = await response.json();
+        text = responseJson.message || "Sorry, I couldn't get a response.";
+      } catch (e) {
+        text = "Sorry, I couldn't reach the assistant. Please try again.";
+      }
+
+      const extractedIds = extractIdsFromString(text);
+      botMessageSpan.innerText = text.replace(/\n+[-*\d][\S\s]*/g, "");
+      botMessage.classList.remove("bot-message-loading");
+
+      if (extractedIds.length > 0) {
+        const productsDiv = document.createElement("div");
+        productsDiv.classList.add("bot-products");
+        for (const id of extractedIds) {
+          try {
+            const productResponse = await fetch(baseUrl + "/product-meta/" + id);
+            const product = await productResponse.json();
+            const a = document.createElement("a");
+            a.classList.add("bot-product");
+            a.href = baseUrl + "/product/" + id;
+            const img = document.createElement("img");
+            img.src = product["picture"];
+            img.classList.add("bot-product-img");
+            img.onerror = function () { this.style.display = "none"; };
+            a.appendChild(img);
+            const desc = document.createElement("div");
+            desc.classList.add("bot-product-description");
+            let d = product["description"] || "";
+            if (d.length > 350) { d = d.substring(0, 330) + "..."; }
+            const name = document.createElement("b");
+            name.innerText = product["name"];
+            desc.appendChild(name);
+            desc.appendChild(document.createElement("br"));
+            desc.appendChild(document.createTextNode(d));
+            a.appendChild(desc);
+            productsDiv.appendChild(a);
+          } catch (e) { /* skip products that fail to load */ }
+        }
+        botMessages.appendChild(productsDiv);
+      }
+
+      botMessages.scrollTo(0, botMessages.scrollHeight);
+      botbutton.disabled = false;
+      botinput.disabled = false;
+      botinput.focus();
+      save();
+    }
+
+    const saved = sessionStorage.getItem(STORE);
+    if (saved) { botMessages.innerHTML = saved; }
+
+    botbutton.addEventListener("click", handleSend);
+    botinput.addEventListener("keypress", (e) => { if (e.key === "Enter") { botbutton.click(); } });
+    closeBtn.addEventListener("click", closePopup);
+    backdrop.addEventListener("click", closePopup);
+    launcher.addEventListener("click", openPopup);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !popup.hidden) { closePopup(); } });
+    document.querySelectorAll("[data-open-assistant]").forEach((el) =>
+      el.addEventListener("click", (e) => { e.preventDefault(); openPopup(); }));
+
+    if (sessionStorage.getItem(SEEN)) {
+      launcher.hidden = false;
+    } else {
+      openPopup();
+    }
+  })();
+</script>
+
+{{ end }}
