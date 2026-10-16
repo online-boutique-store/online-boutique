@@ -164,6 +164,11 @@ def _bedrock_request_hook(span, service_name, operation_name, api_params):
     if not (_is_converse(service_name, operation_name) and span.is_recording()):
         return
     span.set_attribute("gen_ai.provider.name", "aws.bedrock")
+    # Observe classifies LLM spans by these Traceloop/OpenLLMetry attributes.
+    span.set_attribute("traceloop.span.kind", "task")
+    span.set_attribute("llm.request.type", "chat")
+    model_id = api_params.get("modelId", "")
+    span.set_attribute("llm.request.model", model_id)
     if not _content_enabled():
         return
     msgs = [{"role": "system", "parts": _parts(api_params.get("system"))}] if api_params.get("system") else []
@@ -177,6 +182,7 @@ def _bedrock_response_hook(span, service_name, operation_name, result):
     if not _content_enabled():
         return
     msg = (result or {}).get("output", {}).get("message") or {}
+    span.set_attribute("llm.response.model", (result or {}).get("modelId", ""))
     span.set_attribute("gen_ai.output.messages", _json_attr(
         [{"role": msg.get("role", "assistant"), "parts": _parts(msg.get("content")),
           "finish_reason": (result or {}).get("stopReason")}]))

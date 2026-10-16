@@ -166,6 +166,7 @@ def _execute_tool(session, call, labels):
         model_args, parse_error = {}, "tool input must be a JSON object"
 
     with tracer.start_as_current_span(f"execute_tool {name}") as span:
+        span.set_attribute("traceloop.span.kind", "tool")
         span.set_attribute("gen_ai.operation.name", "execute_tool")
         span.set_attribute("gen_ai.tool.name", name)
         span.set_attribute("gen_ai.tool.type", "function")
@@ -260,6 +261,8 @@ def run(session, prompt, category, conversation_id):
     labels = {"prompt.version": version, "app.prompt.category": category}
 
     with tracer.start_as_current_span(f"invoke_agent {AGENT_NAME}") as span:
+        span.set_attribute("traceloop.span.kind", "agent")
+        span.set_attribute("gen_ai.is_llm_root", "true")
         span.set_attribute("gen_ai.operation.name", "invoke_agent")
         span.set_attribute("gen_ai.agent.name", AGENT_NAME)
         span.set_attribute("gen_ai.provider.name", PROVIDER)
