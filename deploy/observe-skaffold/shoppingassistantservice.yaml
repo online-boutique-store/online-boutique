@@ -115,6 +115,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: shoppingassistantservice
-  # IRSA alternative to EKS Pod Identity - set your role ARN and uncomment:
-  # annotations:
-  #   eks.amazonaws.com/role-arn: arn:aws:iam::<account-id>:role/<bedrock-invoke-role>
+  # IRSA: the EKS pod-identity webhook injects AWS_ROLE_ARN + a projected web
+  # identity token, which boto3 picks up. Role is created per docs/ai-demo.md.
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::739672403694:role/ob-shoppingassistant-bedrock
