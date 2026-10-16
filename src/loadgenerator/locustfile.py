@@ -281,6 +281,10 @@ def sc_checkout(c):
         f"Can you check out in {currency}?",
         f"Please check out now and charge me in {currency}.",
         f"I'm ready to buy, check out in {currency}."]))
+    # Claude sometimes asks "shall I place the order?" before charging; answer
+    # like a real customer would so the checkout actually happens.
+    if not c.checkout_failed() and "?" in (c.last.get("message") or ""):
+        c.say("checkout_request", random.choice(["Yes, go ahead.", "Yes please, place the order.", "Confirmed."]))
     if not c.checkout_failed():
         return
     if random.random() < WHY_PROB:
