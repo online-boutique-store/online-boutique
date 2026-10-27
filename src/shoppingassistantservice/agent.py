@@ -21,6 +21,7 @@ from botocore.exceptions import (BotoCoreError, ClientError, ConnectionClosedErr
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+import account_tools
 import accounts
 import backends
 import checkout
@@ -41,7 +42,7 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 def _redact(s):
     """Emails in agent-owned attributes become <email:hash> (stable, joinable, PII-safe)."""
-    return _EMAIL_RE.sub(lambda m: f"<email:{accounts.email_hash(m.group(0))}>", s)
+    return _EMAIL_RE.sub("<email_redacted>", s)
 
 
 def _clip(value, n=_MAX_ATTR):
@@ -59,7 +60,7 @@ class Session:
         self.llm_requests = 0
         self.unrecovered_value = 0.0  # USD of the latest failed checkout, cleared on success
         self.failed_checkouts = 0
-        self.conversation_id = sid
+        self.conversation_id = tel.session_ref(sid) or tel.opaque_fallback(sid)
         self.checkout = checkout.CheckoutState()
         self.checkout.session_id = sid
         self.customer_account = None
@@ -260,7 +261,7 @@ def _execute_tool(session, call, labels):
             bag["app.checkout.id"] = st.checkout_id
         token = tel.attach_baggage(**bag)
         attempts_before = st.attempt
-        fn = checkout.TOOLS.get(name)
+        fn = checkout.TOOLS.get(name) or account_tools.TOOLS.get(name)
         try:
             if parse_error:
                 result = {"error": parse_error}
@@ -300,7 +301,7 @@ def _execute_tool(session, call, labels):
             tel.tool_errors_total.add(1, {**tool_labels, "error.type": result.get("grpc_status", "tool_error")})
             tel.warn("tool.error", **{"tool.name": name, "error": _clip(result["error"], 300),
                                       "fault.injected": injected, "prompt.version": labels["prompt.version"],
-                                      "app.session.id": session.id, "app.customer.id": session.id})
+                                      **tel.identity_attrs(session.id, getattr(st, "customer_id", None))})
         if is_checkout and st.attempt > attempts_before:
             _record_checkout(session, span, result, value_usd, injected, labels)
         return result
@@ -340,7 +341,7 @@ def _record_checkout(session, span, result, value_usd, injected, labels):
         "checkout.order_id": result.get("order_id"),
         "checkout.error": _clip(result["error"], 300) if failed else None,
         "fault.injected": injected, "prompt.version": labels["prompt.version"],
-        "app.session.id": session.id, "app.customer.id": session.id})
+        **tel.identity_attrs(session.id, getattr(session.checkout, "customer_id", None))})
 
 
 # --- the agent -------------------------------------------------------------------------
@@ -370,12 +371,11 @@ def _run_turn(session, prompt, category, conversation_id, version, labels, t_run
         span.set_attribute("prompt.version", version)
         span.set_attribute("app.prompt.version", version)
         span.set_attribute("app.prompt.category", category)
-        span.set_attribute("app.session.id", session.id)
+        for k, v in tel.identity_attrs(session.id, getattr(session.checkout, "customer_id", None)).items():
+            span.set_attribute(k, v)
         span.set_attribute("app.customer.synthetic", True)
         if getattr(session, "customer_account", None):
             span.set_attribute("app.account.authenticated", True)
-            span.set_attribute("app.customer.name", session.customer_account.get("name", ""))
-            span.set_attribute("app.customer.email", session.customer_account.get("email", ""))
             span.set_attribute("app.account.profile_available", bool(getattr(session, "profile_available", True)))
         if tel._content_enabled():
             span.set_attribute("app.prompt.text", _clip(prompt))
@@ -473,7 +473,7 @@ def _run_turn(session, prompt, category, conversation_id, version, labels, t_run
                 tel.tokens_total.add(n, {"prompt.version": version, "direction": direction,
                                          "gen_ai.request.model": config.BEDROCK_MODEL_ID})
         tel.event("assistant.request.completed", **{
-            "app.session.id": session.id, "app.customer.id": session.id,
+            **tel.identity_attrs(session.id, getattr(session.checkout, "customer_id", None)),
             "app.prompt.category": category, "prompt.version": version,
             "app.prompt.turn": session.turns, "prompt_chars": len(prompt),
             "agent.outcome": outcome, "agent.steps": steps, "agent.tools": used,

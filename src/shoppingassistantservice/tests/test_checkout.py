@@ -20,8 +20,9 @@ def _cart_contents(user_id):
     return list(CART["items"]), CART["total"]
 
 
-def _place_order(user_id, currency, email, address, card):
-    ORDER["calls"].append({"currency": currency, "email": email, "card_len": len(card)})
+def _place_order(user_id, currency, email, address, card, idempotency_key="", account_token="", payment_method_id=""):
+    ORDER["calls"].append({"currency": currency, "email": email, "card_len": len(card),
+                           "key": idempotency_key, "token": account_token})
     if ORDER["fail"]:
         return {"error": f"INTERNAL: {ORDER['fail']}", "grpc_status": "INTERNAL"}
     return {"order_id": "ord-1", "shipping_tracking_id": "trk", "items": []}
@@ -144,6 +145,9 @@ def test_funnel_counts_each_stage_once_and_terminal_once_per_attempt():
     ORDER["fail"] = None
     assert "order_id" in call(checkout.place_order, s)   # retry
     assert rec.terminals == [("failed", "INTERNAL"), ("completed", None)]
+    keys = [c["key"] for c in ORDER["calls"][-2:]]
+    assert keys[0] and keys[0] == keys[1], keys         # a retry of the same order reuses its idempotency key
+    assert keys[0].startswith("asst:") and 8 <= len(keys[0]) <= 80
     names = [x[0] for x in rec.stages]
     assert names == ["identify", "shipping", "payment", "currency", "confirm", "placing"], names
     assert checkout.sweep_abandoned([s], now=1e12) == 0  # finished flows are never abandoned

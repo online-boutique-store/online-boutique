@@ -53,6 +53,8 @@ var (
 				Funcs(template.FuncMap{
 			"renderMoney":        renderMoney,
 			"renderCurrencyLogo": renderCurrencyLogo,
+			"dict":               templateDict,
+			"date":               renderDate,
 		}).ParseGlob("templates/*.html"))
 	plat platformDetails
 )
@@ -268,6 +270,7 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request) {
+	ensureCheckoutKey(w, r)
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("view user cart")
 
@@ -338,6 +341,7 @@ func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request
 		"total_cost":       totalPrice,
 		"items":            items,
 		"expiration_years": []int{year, year + 1, year + 2, year + 3, year + 4},
+		"saved_methods":    fe.savedMethods(r),
 	})); err != nil {
 		log.Println(err)
 	}
@@ -360,6 +364,7 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		ccCVV, _      = strconv.ParseInt(r.FormValue("credit_card_cvv"), 10, 32)
 	)
 
+	savedMethodID := strings.TrimSpace(r.FormValue("payment_method_id"))
 	payload := validator.PlaceOrderPayload{
 		Email:         email,
 		StreetAddress: streetAddress,
@@ -372,6 +377,10 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		CcYear:        ccYear,
 		CcCVV:         ccCVV,
 	}
+	if savedMethodID != "" {
+		// A saved demo card is charged by token inside checkout; no card fields are submitted or validated.
+		payload.CcNumber, payload.CcMonth, payload.CcYear, payload.CcCVV = "4111111111111111", 1, 2099, 123
+	}
 	if err := payload.Validate(); err != nil {
 		renderHTTPError(log, r, w, validator.ValidationErrorResponse(err), http.StatusUnprocessableEntity)
 		return
@@ -383,43 +392,41 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 	r = r.WithContext(ctx)
 	stampAppAttrs(ctx)
 
+	key := ensureCheckoutKey(w, r)
 	order, err := pb.NewCheckoutServiceClient(fe.checkoutSvcConn).
-		PlaceOrder(r.Context(), &pb.PlaceOrderRequest{
-			Email: payload.Email,
-			CreditCard: &pb.CreditCardInfo{
-				CreditCardNumber:          payload.CcNumber,
-				CreditCardExpirationMonth: int32(payload.CcMonth),
-				CreditCardExpirationYear:  int32(payload.CcYear),
-				CreditCardCvv:             int32(payload.CcCVV)},
-			UserId:       sessionID(r),
-			UserCurrency: currentCurrency(r),
+		PlaceOrder(withAccountSession(r), &pb.PlaceOrderRequest{
+			Email:           payload.Email,
+			CreditCard:      cardForRequest(payload, savedMethodID),
+			PaymentMethodId: savedMethodID,
+			UserId:          sessionID(r),
+			UserCurrency:    currentCurrency(r),
+			IdempotencyKey:  key,
+			Channel:         "web",
 			Address: &pb.Address{
 				StreetAddress: payload.StreetAddress,
 				City:          payload.City,
 				State:         payload.State,
 				ZipCode:       int32(payload.ZipCode),
+				PostalCode:    fmt.Sprintf("%05d", payload.ZipCode),
 				Country:       payload.Country},
 		})
 	if err != nil {
 		// Capture what this failed checkout was worth before returning the
 		// error — see stampFailedCheckoutValue in otelattrs.go.
 		fe.stampFailedCheckoutValue(r.Context(), sessionID(r), currentCurrency(r))
-		renderHTTPError(log, r, w, errors.Wrap(err, "failed to complete the order"), http.StatusInternalServerError)
+		fe.checkoutFailure(w, r, log, err)
 		return
 	}
+	clearCheckoutKey(w, r)
 	log.WithField("order", order.GetOrder().GetOrderId()).Info("order placed")
 
-	// Backfill the order result attributes onto the root frontend span and into
-	// baggage so the trailing getRecommendations call carries them. Note
-	// transaction_id / card_type are not part of OrderResult so they stay on
-	// the checkout sub-flow spans only.
+	// Backfill the order identity onto the root frontend span and into baggage so the trailing
+	// getRecommendations call carries it.
 	r = r.WithContext(withBaggage(r.Context(), "app.order.id", order.GetOrder().GetOrderId()))
-	r = r.WithContext(withBaggage(r.Context(), "app.shipping.tracking_id", order.GetOrder().GetShippingTrackingId()))
 	var purchasedIDs []string
 	for _, v := range order.GetOrder().GetItems() {
 		purchasedIDs = append(purchasedIDs, v.GetItem().GetProductId())
 	}
-	r = r.WithContext(withBaggageSlice(r.Context(), "app.order.items", purchasedIDs))
 	stampAppAttrs(r.Context())
 
 	recommendations, _ := fe.getRecommendations(r.Context(), sessionID(r), nil)
@@ -440,6 +447,7 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		"show_currency":   false,
 		"currencies":      currencies,
 		"order":           order.GetOrder(),
+		"record_status":   order.GetRecordStatus(),
 		"total_paid":      &totalPaid,
 		"recommendations": recommendations,
 	})); err != nil {
@@ -463,6 +471,10 @@ func (fe *frontendServer) assistantHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func (fe *frontendServer) accountActivationHandler(w http.ResponseWriter, r *http.Request) {
+	if fe.account != nil {
+		fe.grpcActivation(w, r)
+		return
+	}
 	if r.Method == http.MethodPost {
 		fe.accountSubmit(w, r, "activation")
 		return
@@ -471,6 +483,10 @@ func (fe *frontendServer) accountActivationHandler(w http.ResponseWriter, r *htt
 }
 
 func (fe *frontendServer) accountCreateHandler(w http.ResponseWriter, r *http.Request) {
+	if fe.account != nil {
+		fe.grpcSignup(w, r)
+		return
+	}
 	if r.Method == http.MethodPost {
 		fe.accountSubmit(w, r, "create")
 		return
@@ -479,6 +495,10 @@ func (fe *frontendServer) accountCreateHandler(w http.ResponseWriter, r *http.Re
 }
 
 func (fe *frontendServer) loginHandler(w http.ResponseWriter, r *http.Request) {
+	if fe.account != nil {
+		fe.grpcLogin(w, r)
+		return
+	}
 	if r.Method == http.MethodPost {
 		fe.accountSubmit(w, r, "login")
 		return
@@ -487,6 +507,10 @@ func (fe *frontendServer) loginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (fe *frontendServer) accountProfileHandler(w http.ResponseWriter, r *http.Request) {
+	if fe.account != nil {
+		fe.requireLogin(fe.accountProfile)(w, r)
+		return
+	}
 	if r.Method == http.MethodPost {
 		fe.accountSubmit(w, r, "profile")
 		return
@@ -685,6 +709,10 @@ func (fe *frontendServer) accountAPI(r *http.Request, path string, payload map[s
 }
 
 func (fe *frontendServer) logoutHandler(w http.ResponseWriter, r *http.Request) {
+	if fe.account != nil {
+		fe.grpcLogout(w, r)
+		return
+	}
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("logging out")
 	if c, err := r.Cookie(cookieAuth); err == nil {
@@ -865,6 +893,12 @@ func injectCommonTemplateData(r *http.Request, payload map[string]interface{}) m
 		"currentYear":       time.Now().Year(),
 		"baseUrl":           baseUrl,
 	}
+	if sess := accountFromContext(r.Context()); sess.Authenticated {
+		data["account_logged_in"] = true
+		data["account_first_name"] = sess.FirstName
+		data["account_profile_incomplete"] = !sess.Unknown && !sess.ProfileComplete
+	}
+	data["account_enabled"] = accountDashboardEnabled
 
 	for k, v := range payload {
 		data[k] = v

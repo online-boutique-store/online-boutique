@@ -17,8 +17,8 @@ package main
 import (
 	"context"
 	"net/http"
-	"time"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
@@ -67,7 +67,9 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"http.req.id":     requestID.String(),
 	}).WithContext(ctx)
 	if v, ok := r.Context().Value(ctxKeySessionID{}).(string); ok {
-		log = log.WithField("session", v)
+		if ref := sessionRef(v); ref != "" {
+			log = log.WithField("session_ref", ref)
+		}
 	}
 	log.Debug("request started")
 	defer func() {
@@ -81,7 +83,7 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// gRPC span in this request inherits them. session_id comes from
 	// ensureSessionID (which ran before this handler); currency from the cookie.
 	if sid, ok := ctx.Value(ctxKeySessionID{}).(string); ok {
-		ctx = withBaggage(ctx, "app.session.id", sid)
+		ctx = withBaggage(ctx, "app.session.ref", sessionRef(sid))
 	}
 	ctx = withBaggage(ctx, "app.request.id", requestID.String())
 	ctx = withBaggage(ctx, "app.currency", currentCurrency(r))

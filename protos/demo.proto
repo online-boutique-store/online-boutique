@@ -105,6 +105,7 @@ message SearchProductsResponse {
 service ShippingService {
     rpc GetQuote(GetQuoteRequest) returns (GetQuoteResponse) {}
     rpc ShipOrder(ShipOrderRequest) returns (ShipOrderResponse) {}
+    rpc GetShipment(GetShipmentRequest) returns (GetShipmentResponse) {}
 }
 
 message GetQuoteRequest {
@@ -119,10 +120,22 @@ message GetQuoteResponse {
 message ShipOrderRequest {
     Address address = 1;
     repeated CartItem items = 2;
+    // Repeating the key returns the original tracking id; no second shipment is created.
+    string idempotency_key = 3;
 }
 
 message ShipOrderResponse {
     string tracking_id = 1;
+    bool replayed = 2;
+}
+
+message GetShipmentRequest {
+    string idempotency_key = 1;
+}
+
+message GetShipmentResponse {
+    bool found = 1;
+    string tracking_id = 2;
 }
 
 message Address {
@@ -131,6 +144,9 @@ message Address {
     string state = 3;
     string country = 4;
     int32 zip_code = 5;
+    // Format-preserving postal code ("02134", "94105-1234"); zip_code remains for older callers.
+    string postal_code = 6;
+    string address_line2 = 7;   // optional apartment / suite
 }
 
 // -----------------Currency service-----------------
@@ -174,6 +190,23 @@ message CurrencyConversionRequest {
 
 service PaymentService {
     rpc Charge(ChargeRequest) returns (ChargeResponse) {}
+    // Lookup by idempotency key; used by checkout to resolve an uncertain payment without charging again.
+    rpc GetCharge(GetChargeRequest) returns (GetChargeResponse) {}
+    // Synthetic demo cards only: exchanges a catalog id for an opaque token bound server-side to that
+    // entry. Anything that is not a catalog id (including real-looking card numbers) is rejected.
+    rpc Tokenize(TokenizeRequest) returns (TokenizeResponse) {}
+}
+
+message TokenizeRequest {
+    string catalog_id = 1;
+}
+
+message TokenizeResponse {
+    string token = 1;
+    string brand = 2;
+    string last4 = 3;
+    int32 exp_month = 4;
+    int32 exp_year = 5;
 }
 
 message CreditCardInfo {
@@ -186,10 +219,25 @@ message CreditCardInfo {
 message ChargeRequest {
     Money amount = 1;
     CreditCardInfo credit_card = 2;
+    // A charge is identified by this key: repeating it returns the original result and never charges twice.
+    string idempotency_key = 3;
+    // Opaque demo-PSP token for a saved synthetic card (used instead of credit_card).
+    string payment_token = 4;
 }
 
 message ChargeResponse {
     string transaction_id = 1;
+    bool replayed = 2;
+}
+
+message GetChargeRequest {
+    string idempotency_key = 1;
+}
+
+message GetChargeResponse {
+    bool found = 1;
+    string transaction_id = 2;
+    Money amount = 3;
 }
 
 // -------------Email service-----------------
@@ -230,10 +278,18 @@ message PlaceOrderRequest {
     Address address = 3;
     string email = 5;
     CreditCardInfo credit_card = 6;
+    // Stable per checkout attempt (generated when the checkout form / assistant checkout is created).
+    // Retrying with the same key resumes or replays the same order; the order id derives from it.
+    string idempotency_key = 7;
+    string channel = 8;            // web | assistant
+    string payment_method_id = 9;  // saved synthetic card (uuid); the token is resolved server-side
 }
 
 message PlaceOrderResponse {
     OrderResult order = 1;
+    string status = 2;             // completed
+    string record_status = 3;      // recorded | history_unrecorded
+    bool replayed = 4;
 }
 
 // ------------Ad service------------------

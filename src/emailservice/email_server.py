@@ -104,7 +104,8 @@ class EmailService(BaseEmailService):
 class DummyEmailService(BaseEmailService):
   def SendOrderConfirmation(self, request, context):
     stamp_app_attrs()
-    logger.info('A request to send order confirmation email to {} has been received.'.format(request.email))
+    # Never log the recipient address: logs are exported over OTLP.
+    logger.info('order confirmation request received', extra={'app.order.id': request.order.order_id})
     return demo_pb2.Empty()
 
 class HealthCheck():

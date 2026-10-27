@@ -89,6 +89,11 @@ type frontendServer struct {
 
 	shoppingAssistantSvcAddr string
 	accountAPISecret         string
+
+	// ACCOUNT_BACKEND=grpc: accountservice owns accounts; account == nil means the legacy local flow.
+	account        *accountGRPC
+	accountSvcAddr string
+	accountSvcConn *grpc.ClientConn
 }
 
 func main() {
@@ -102,7 +107,7 @@ func main() {
 
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(
-			propagation.TraceContext{}, propagation.Baggage{}))
+			propagation.TraceContext{}, allowlistBaggage{}))
 
 	baseUrl = os.Getenv("BASE_URL")
 
@@ -137,6 +142,18 @@ func main() {
 		mustMapEnv(&svc.accountAPISecret, "ACCOUNT_API_SECRET")
 	}
 
+	if os.Getenv("ACCOUNT_BACKEND") == "grpc" {
+		var accountSecret string
+		mustMapEnv(&svc.accountSvcAddr, "ACCOUNT_SERVICE_ADDR")
+		mustMapEnv(&accountSecret, "ACCOUNT_SERVICE_SECRET")
+		mustConnGRPC(ctx, &svc.accountSvcConn, svc.accountSvcAddr)
+		svc.account = newAccountGRPC(svc.accountSvcConn, accountSecret)
+		accountDashboardEnabled = true
+		log.Info("account backend: accountservice (gRPC)")
+	} else {
+		log.Info("account backend: local (shopping assistant HTTP API)")
+	}
+
 	mustConnGRPC(ctx, &svc.currencySvcConn, svc.currencySvcAddr)
 	mustConnGRPC(ctx, &svc.productCatalogSvcConn, svc.productCatalogSvcAddr)
 	mustConnGRPC(ctx, &svc.cartSvcConn, svc.cartSvcAddr)
@@ -157,7 +174,21 @@ func main() {
 	r.HandleFunc(baseUrl+"/cart/checkout", svc.placeOrderHandler).Methods(http.MethodPost)
 	r.HandleFunc(baseUrl+"/account/profile", svc.accountProfileHandler).Methods(http.MethodGet, http.MethodPost)
 	r.HandleFunc(baseUrl+"/login", svc.loginHandler).Methods(http.MethodGet, http.MethodPost)
-	r.HandleFunc(baseUrl+"/logout", svc.logoutHandler).Methods(http.MethodGet)
+	r.HandleFunc(baseUrl+"/logout", svc.logoutHandler).Methods(http.MethodGet, http.MethodPost)
+	if svc.account != nil {
+		r.HandleFunc(baseUrl+"/account", svc.requireLogin(svc.accountDashboard)).Methods(http.MethodGet, http.MethodHead)
+		r.HandleFunc(baseUrl+"/account/addresses", svc.requireLogin(svc.accountAddresses)).Methods(http.MethodGet, http.MethodHead)
+		r.HandleFunc(baseUrl+"/account/addresses/new", svc.requireLogin(svc.accountAddressForm)).Methods(http.MethodGet, http.MethodPost)
+		r.HandleFunc(baseUrl+"/account/addresses/{id}/edit", svc.requireLogin(svc.accountAddressForm)).Methods(http.MethodGet, http.MethodPost)
+		r.HandleFunc(baseUrl+"/account/addresses/{id}/delete", svc.requireLogin(svc.accountAddressAction("delete"))).Methods(http.MethodPost)
+		r.HandleFunc(baseUrl+"/account/addresses/{id}/default", svc.requireLogin(svc.accountAddressAction("default"))).Methods(http.MethodPost)
+		r.HandleFunc(baseUrl+"/account/orders", svc.requireLogin(svc.accountOrders)).Methods(http.MethodGet, http.MethodHead)
+		r.HandleFunc(baseUrl+"/account/orders/{id}", svc.requireLogin(svc.accountOrder)).Methods(http.MethodGet, http.MethodHead)
+		r.HandleFunc(baseUrl+"/account/payment-methods", svc.requireLogin(svc.accountPayments)).Methods(http.MethodGet, http.MethodHead)
+		r.HandleFunc(baseUrl+"/account/payment-methods/add", svc.requireLogin(svc.accountPaymentAdd)).Methods(http.MethodPost)
+		r.HandleFunc(baseUrl+"/account/payment-methods/{id}/delete", svc.requireLogin(svc.accountPaymentAction("delete"))).Methods(http.MethodPost)
+		r.HandleFunc(baseUrl+"/account/payment-methods/{id}/default", svc.requireLogin(svc.accountPaymentAction("default"))).Methods(http.MethodPost)
+	}
 	r.HandleFunc(baseUrl+"/assistant", svc.assistantHandler).Methods(http.MethodGet)
 	r.PathPrefix(baseUrl + "/static/").Handler(http.StripPrefix(baseUrl+"/static/", http.FileServer(http.Dir("./static/"))))
 	r.HandleFunc(baseUrl+"/robots.txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "User-agent: *\nDisallow: /") })
@@ -166,6 +197,7 @@ func main() {
 	r.HandleFunc(baseUrl+"/bot", svc.chatBotHandler).Methods(http.MethodPost)
 
 	var handler http.Handler = r
+	handler = svc.accountContext(handler)              // resolve account session, seed identity baggage
 	handler = &logHandler{log: log, next: handler}     // add logging
 	handler = ensureSessionID(handler)                 // add session ID
 	handler = otelhttp.NewHandler(handler, "frontend") // add OTel tracing
@@ -194,7 +226,7 @@ func initTracing(log logrus.FieldLogger, ctx context.Context, svc *frontendServe
 		log.Warnf("warn: Failed to create trace resource: %v", err)
 	}
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithBatcher(sanitizingExporter{inner: exporter}),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	otel.SetTracerProvider(tp)

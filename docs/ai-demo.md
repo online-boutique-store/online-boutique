@@ -112,6 +112,12 @@ To investigate the prompt regression, filter traces on `prompt.version=v2` and `
 
 **Status: implemented and tested locally; not deployed.** Nothing below has been applied to the cluster.
 
+> **Superseded in part:** the account experience was extended (accountservice, customer dashboard, durable
+> idempotent checkout, saved demo payment methods, assistant order tools). See
+> [account-experience-runbook.md](account-experience-runbook.md) for the architecture, configuration, rollout and
+> rollback, and [account-experience-telemetry.md](account-experience-telemetry.md) for exactly what is and is not
+> exported. With `ACCOUNT_BACKEND=local` the flow described below is still available.
+
 ### Design
 - Postgres is the source of truth for customers, addresses, activation claims and login events (`src/shoppingassistantservice/migrations/0001_accounts.sql`). Passwords are PBKDF2 hashes.
 - The assistant applies migrations itself at start-up on a dedicated connection inside one transaction, guarded by `pg_try_advisory_xact_lock`. It tracks readiness (`unknown|migrating|ready|stale|failed`) bound to a per-database `instance_id`, and revalidates on connection errors, new connections and every 60 seconds, so a restarted or replaced database is migrated again without restarting the pod. `/readyz/accounts` reports this; `/healthz` stays independent of Postgres.

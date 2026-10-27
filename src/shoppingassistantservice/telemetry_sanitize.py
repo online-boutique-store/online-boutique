@@ -58,13 +58,13 @@ _known = OrderedDict()   # lower-cased exact sensitive values seen by the app
 _MAX_KNOWN = 1024
 
 
-def register_sensitive(*values):
+def register_sensitive(*values, min_len=4):
     """Remember exact values (street lines, secrets) so any telemetry text that
     echoes them - even free text - is scrubbed at export time."""
     with _lock:
         for v in values:
             v = str(v or "").strip()
-            if len(v) < 4:
+            if len(v) < min_len:
                 continue
             _known.pop(v.lower(), None)
             _known[v.lower()] = None

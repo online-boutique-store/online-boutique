@@ -1,7 +1,7 @@
 """OpenTelemetry wiring for the checkout state machine (spans, events, logs, metrics).
 
 Attribute names are shared across traces, logs and metrics:
-  app.session.id, app.customer.id (=session id), app.customer.email_hash (PII-safe),
+  app.session.ref (HMAC), app.customer.id (Postgres UUID, signed-in only), app.customer.authenticated,
   app.customer.type (new|returning|guest|unknown), app.checkout.id, app.checkout.stage,
   app.prompt.version, app.conversation.id.
 """
@@ -16,17 +16,13 @@ tracer = tel.tracer
 
 def corr(st):
     """Correlation attributes stamped on spans, log records and span events."""
-    sid = getattr(st, "session_id", "")
     out = {
         "app.checkout.id": st.checkout_id,
         "app.checkout.stage": "done" if st.done else st.current_stage(),
         "app.customer.type": st.customer_type,
         "app.prompt.version": incident.prompt_version(),
-        "app.session.id": sid,
-        "app.customer.id": sid,
+        **tel.identity_attrs(getattr(st, "session_id", ""), getattr(st, "customer_id", None)),
     }
-    if st.email_hash:
-        out["app.customer.email_hash"] = st.email_hash
     return out
 
 

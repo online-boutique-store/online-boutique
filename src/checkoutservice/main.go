@@ -16,10 +16,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/attribute"
 
 	"cloud.google.com/go/profiler"
 	"github.com/google/uuid"
@@ -37,8 +43,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const (
@@ -72,6 +78,13 @@ type checkoutService struct {
 
 	paymentSvcAddr string
 	paymentSvcConn *grpc.ClientConn
+
+	// Durable checkout: the dedicated order-queue Redis, the accountservice client, and completions that
+	// could not be published yet. queue == nil keeps the previous non-durable behaviour.
+	queue          *orderQueue
+	account        *accountClient
+	accountSvcConn *grpc.ClientConn
+	pending        pendingSet
 }
 
 func main() {
@@ -113,7 +126,17 @@ func main() {
 	mustConnGRPC(ctx, &svc.emailSvcConn, svc.emailSvcAddr)
 	mustConnGRPC(ctx, &svc.paymentSvcConn, svc.paymentSvcAddr)
 
-	log.Infof("service config: %+v", svc)
+	svc.queue = newOrderQueue()
+	if addr := os.Getenv("ACCOUNT_SERVICE_ADDR"); addr != "" {
+		mustConnGRPC(ctx, &svc.accountSvcConn, addr)
+		svc.account = newAccountClient(svc.accountSvcConn)
+	}
+	if svc.queue != nil {
+		log.Info("durable idempotent checkout enabled (order queue configured)")
+		go svc.runBackground(context.Background())
+	} else {
+		log.Warn("ORDER_QUEUE_ADDR not set: checkout is NOT durable or idempotent")
+	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
@@ -125,7 +148,7 @@ func main() {
 	// Propagate trace context always
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(
-			propagation.TraceContext{}, propagation.Baggage{}))
+			propagation.TraceContext{}, allowlistBaggage{}))
 	srv = grpc.NewServer(
 		grpc.UnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
 		grpc.StreamInterceptor(otelgrpc.StreamServerInterceptor()),
@@ -145,7 +168,6 @@ func initStats() {
 func initTracing() {
 	var (
 		collectorAddr string
-		collectorConn *grpc.ClientConn
 	)
 
 	ctx := context.Background()
@@ -153,7 +175,11 @@ func initTracing() {
 	defer cancel()
 
 	mustMapEnv(&collectorAddr, "COLLECTOR_SERVICE_ADDR")
-	mustConnGRPC(ctx, &collectorConn, collectorAddr)
+	// The exporter's own connection must not be instrumented, or every export creates more spans.
+	collectorConn, err := grpc.DialContext(ctx, collectorAddr, grpc.WithInsecure())
+	if err != nil {
+		panic(errors.Wrapf(err, "grpc: failed to connect %s", collectorAddr))
+	}
 
 	exporter, err := otlptracegrpc.New(
 		ctx,
@@ -169,7 +195,7 @@ func initTracing() {
 		log.Warnf("warn: Failed to create trace resource: %v", err)
 	}
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithBatcher(sanitizingExporter{inner: exporter}),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	otel.SetTracerProvider(tp)
@@ -227,9 +253,9 @@ func (cs *checkoutService) Watch(req *healthpb.HealthCheckRequest, ws healthpb.H
 	return status.Errorf(codes.Unimplemented, "health check via Watch not implemented")
 }
 
-func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
+func (cs *checkoutService) placeOrderLegacy(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
 	stampAppAttrs(ctx)
-	log.WithContext(ctx).Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
+	log.WithContext(ctx).Info("[PlaceOrder] legacy path")
 
 	orderID, err := uuid.NewUUID()
 	if err != nil {
@@ -242,12 +268,6 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	// whatever email/address the shopper entered on the checkout form, not
 	// a persistent CRM-grade profile.
 	ctx = withBaggage(ctx, "app.order.id", orderID.String())
-	ctx = withBaggage(ctx, "app.customer.id", req.UserId)
-	ctx = withBaggage(ctx, "app.customer.email", req.Email)
-	// City is part of the shipping address and must not leave in telemetry;
-	// state/country stay as coarse region dimensions.
-	ctx = withBaggage(ctx, "app.customer.state", req.Address.GetState())
-	ctx = withBaggage(ctx, "app.customer.country", req.Address.GetCountry())
 	stampAppAttrs(ctx)
 
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
@@ -296,9 +316,9 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	}
 
 	if err := cs.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
-		log.WithContext(ctx).Warnf("failed to send order confirmation to %q: %+v", req.Email, err)
+		log.WithContext(ctx).Warn("failed to send order confirmation")
 	} else {
-		log.WithContext(ctx).Infof("order confirmation email sent to %q", req.Email)
+		log.WithContext(ctx).Info("order confirmation email sent")
 	}
 	resp := &pb.PlaceOrderResponse{Order: orderResult}
 	return resp, nil
@@ -427,4 +447,92 @@ func (cs *checkoutService) shipOrder(ctx context.Context, address *pb.Address, i
 		return "", fmt.Errorf("shipment failed: %+v", err)
 	}
 	return resp.GetTrackingId(), nil
+}
+
+func (cs *checkoutService) paymentClient() pb.PaymentServiceClient {
+	return pb.NewPaymentServiceClient(cs.paymentSvcConn)
+}
+
+// runBackground retries completions that could not be published, and resumes checkouts whose worker
+// died after the customer was charged (no card data is needed from PAYMENT_CHARGED onward).
+func (cs *checkoutService) runBackground(ctx context.Context) {
+	tick := time.NewTicker(2 * time.Second)
+	janitor := time.NewTicker(janitorEvery())
+	for {
+		select {
+		case <-tick.C:
+			cs.retryPending(ctx)
+		case <-janitor.C:
+			cs.janitorOnce(ctx)
+		}
+	}
+}
+
+func (cs *checkoutService) retryPending(ctx context.Context) {
+	for _, c := range cs.pending.snapshot() {
+		cctx, span := checkoutTracer.Start(ctx, "orders.republish")
+		_, err := cs.queue.advance(cctx, c.key, c.epoch, []string{stShipped}, stCompleted, c.msg, "completed", c.orderID, "resp", c.resp)
+		c.tries++
+		switch {
+		case err == nil:
+			cs.pending.done(c.key)
+			setAppAttrs(span, attribute.String("app.order.outbox_status", "accepted"), attribute.Int("app.order.retry_count", c.tries))
+		case err == errStale:
+			cs.pending.done(c.key) // another worker (the janitor) owns it now
+		default:
+			setAppAttrs(span, attribute.Int("app.order.retry_count", c.tries))
+		}
+		span.End()
+	}
+}
+
+var takeoverScript = redis.NewScript(`
+local state = redis.call('HGET', KEYS[1], 'state')
+if not state or state == 'COMPLETED' or state == 'PAYMENT_DECLINED' or state == 'FAILED_PRE_PAYMENT' or state == 'STARTED' then return {'SKIP'} end
+local now = tonumber(ARGV[1])
+if tonumber(redis.call('HGET', KEYS[1], 'lease_until')) > now then return {'SKIP'} end
+local epoch = tonumber(redis.call('HGET', KEYS[1], 'epoch')) + 1
+redis.call('HSET', KEYS[1], 'epoch', epoch, 'lease_until', now + tonumber(ARGV[2]), 'updated_ms', now)
+return {'OK', epoch, state, redis.call('HGET', KEYS[1], 'plan') or '', redis.call('HGET', KEYS[1], 'order_id') or ''}
+`)
+
+func (cs *checkoutService) janitorOnce(ctx context.Context) {
+	var cursor uint64
+	for i := 0; i < 20; i++ {
+		keys, next, err := cs.queue.rdb.Scan(ctx, cursor, checkoutKeyPref+"*", 100).Result()
+		if err != nil {
+			return
+		}
+		for _, k := range keys {
+			res, err := takeoverScript.Run(ctx, cs.queue.rdb, []string{k}, nowMs(), checkoutLease.Milliseconds()).Slice()
+			if err != nil || res[0].(string) != "OK" {
+				continue
+			}
+			p := &plan{}
+			if json.Unmarshal([]byte(res[3].(string)), p) != nil {
+				continue
+			}
+			jctx, span := checkoutTracer.Start(ctx, "checkout.janitor.resume")
+			key := strings.TrimPrefix(k, checkoutKeyPref)
+			r := &run{cs: cs, key: key, epoch: res[1].(int64), orderID: res[4].(string), state: res[2].(string), plan: p, resumed: true}
+			setAppAttrs(span, attribute.String("app.checkout.resume_from", r.state), attribute.Int("app.checkout.lease_epoch", int(r.epoch)))
+			if _, derr := r.drive(jctx); derr != nil {
+				span.SetAttributes(attribute.String("error.type", "resume_incomplete"))
+			}
+			span.End()
+		}
+		cursor = next
+		if cursor == 0 {
+			return
+		}
+	}
+}
+
+func janitorEvery() time.Duration {
+	if os.Getenv("TELEMETRY_TEST_MODE") == "1" {
+		if sec, err := strconv.Atoi(os.Getenv("CHECKOUT_JANITOR_SECONDS")); err == nil && sec > 0 {
+			return time.Duration(sec) * time.Second
+		}
+	}
+	return 10 * time.Second
 }

@@ -1,0 +1,80 @@
+# Instrumentation coverage matrix (machine-readable). tests/test_accountservice.py::test_matrix asserts every
+# `implemented` row against the spans exported to the local OTLP receiver, and that every AccountService RPC
+# has a row. Rows marked `planned` are filled in by the milestone named in `milestone`.
+#
+# server_attrs  attributes the SERVER span must carry (key present with a schema-valid value)
+# children      span names (or db.system values written as db:<system>) that must appear in the same trace
+# deps          downstream dependencies the workflow touches
+rows:
+  - {id: R01, workflow: web signup,            rpc: Register,              milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.account.created_via, app.account.profile_version, app.customer.id, app.customer.authenticated],
+     children: [accounts.db.customer.create, "db:postgresql", "db:redis"], deps: [postgres, redis]}
+  - {id: R02, workflow: assistant signup,      rpc: BeginAssistantSignup,  milestone: M4, status: implemented,
+     server_attrs: [app.account.action, app.account.created_via, app.customer.id, app.account.activation.outcome],
+     children: [accounts.db.claim.create, "db:postgresql", "db:redis"], deps: [postgres, redis]}
+  - {id: R03, workflow: activation status,     rpc: GetActivation,         milestone: M4, status: implemented,
+     server_attrs: [app.account.action], children: ["db:redis"], deps: [redis, postgres]}
+  - {id: R04, workflow: activation claim,      rpc: Claim,                 milestone: M4, status: implemented,
+     server_attrs: [app.account.action, app.customer.id, app.account.activation.outcome],
+     children: [accounts.db.claim.consume, "db:postgresql", "db:redis"], deps: [postgres, redis]}
+  - {id: R05, workflow: login,                 rpc: Login,                 milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id, app.customer.authenticated],
+     children: [accounts.db.customer.lookup, "db:postgresql", "db:redis"], deps: [postgres, redis]}
+  - {id: R06, workflow: logout,                rpc: Logout,                milestone: M3, status: implemented,
+     server_attrs: [app.account.action], children: ["db:redis"], deps: [redis]}
+  - {id: R07, workflow: session resolve,       rpc: ResolveSession,        milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id, app.customer.authenticated], children: ["db:redis"], deps: [redis]}
+  - {id: R08, workflow: profile view,          rpc: GetProfile,            milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id], children: [accounts.db.customer.get, "db:postgresql"], deps: [postgres]}
+  - {id: R09, workflow: profile update,        rpc: UpdateProfile,         milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id, app.account.profile_version], children: [accounts.db.customer.update, "db:postgresql"], deps: [postgres, redis]}
+  - {id: R10, workflow: registration dry-run,  rpc: ValidateRegistration,  milestone: M3, status: implemented,
+     server_attrs: [app.account.action], children: [], deps: []}
+  - {id: R11, workflow: address list,          rpc: ListAddresses,         milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id, app.account.address_count], children: [accounts.db.address.list, "db:postgresql"], deps: [postgres]}
+  - {id: R12, workflow: address create,        rpc: CreateAddress,         milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id, app.shipping.is_po_box], children: [accounts.db.address.create, "db:postgresql"], deps: [postgres]}
+  - {id: R13, workflow: address update,        rpc: UpdateAddress,         milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id], children: [accounts.db.address.update, "db:postgresql"], deps: [postgres]}
+  - {id: R14, workflow: address delete,        rpc: DeleteAddress,         milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id], children: [accounts.db.address.delete, "db:postgresql"], deps: [postgres]}
+  - {id: R15, workflow: address default,       rpc: SetDefaultAddress,     milestone: M3, status: implemented,
+     server_attrs: [app.account.action, app.customer.id], children: [accounts.db.address.default, "db:postgresql"], deps: [postgres]}
+  - {id: R16, workflow: catalog cards,         rpc: ListCatalogCards,      milestone: M6, suite: payment_methods, status: implemented, server_attrs: [app.account.action], children: [], deps: [paymentservice]}
+  - {id: R17, workflow: payment list,          rpc: ListPaymentMethods,    milestone: M6, suite: payment_methods, status: implemented, server_attrs: [app.account.action, app.customer.id], children: [accounts.db.payment.list, "db:postgresql"], deps: [postgres]}
+  - {id: R18, workflow: payment add,           rpc: AddPaymentMethod,      milestone: M6, suite: payment_methods, status: implemented, server_attrs: [app.account.action, app.customer.id, app.payment.status], children: [accounts.db.payment.add, "db:postgresql"], deps: [paymentservice, postgres]}
+  - {id: R19, workflow: payment delete,        rpc: DeletePaymentMethod,   milestone: M6, suite: payment_methods, status: implemented, server_attrs: [app.account.action, app.customer.id], children: [accounts.db.payment.delete, "db:postgresql"], deps: [postgres]}
+  - {id: R20, workflow: payment default,       rpc: SetDefaultPaymentMethod, milestone: M6, suite: payment_methods, status: implemented, server_attrs: [app.account.action, app.customer.id], children: [accounts.db.payment.default, "db:postgresql"], deps: [postgres]}
+  - {id: R21, workflow: payment token resolve, rpc: ResolvePaymentMethodToken, milestone: M6, suite: payment_methods, status: implemented, server_attrs: [app.account.action, app.customer.id], children: [accounts.db.payment.resolve, "db:postgresql"], deps: [postgres]}
+  - {id: R22, workflow: order list,            rpc: ListOrders,            milestone: M5, suite: checkout_durability, status: implemented, server_attrs: [app.account.action, app.customer.id], children: [], deps: [postgres, order-queue]}
+  - {id: R23, workflow: order detail,          rpc: GetOrder,              milestone: M5, suite: checkout_durability, status: implemented, server_attrs: [app.account.action, app.customer.id, app.order.id], children: [], deps: [postgres]}
+  - {id: R24, workflow: claim guest orders,    rpc: ClaimGuestOrders,      milestone: M5, suite: checkout_durability, status: implemented, server_attrs: [app.account.action, app.customer.id], children: [], deps: [postgres]}
+  - {id: R25, workflow: order queue status,    rpc: GetOrderQueueStatus,   milestone: M5, suite: checkout_durability, status: implemented, server_attrs: [app.account.action], children: [], deps: [order-queue]}
+async_and_cross_service:
+  - {id: X01, workflow: checkout intent/complete publish, milestone: M5, status: implemented,
+     spans: [checkout.idem.begin, orders.publish.intent, checkout.payment, checkout.shipping, checkout.finalize, orders.publish.completed]}
+  - {id: X02, workflow: order consumer (linked trace),  milestone: M5, status: implemented,
+     spans: [orders.consume, orders.persist, "db:postgresql"], link_to: orders.publish.completed}
+  - {id: X03, workflow: idempotent replay / resume,     milestone: M5, status: implemented,
+     attrs: [app.checkout.idempotency_status, app.checkout.state, app.checkout.resume_from, app.checkout.lease_epoch]}
+  - {id: X04, workflow: assistant account/order tools,  milestone: M7, status: implemented,
+     spans: [execute_tool create_account, execute_tool list_orders, execute_tool get_order]}
+frontend:
+  - {id: F01, route: "GET /account",                    action: dashboard_view,  status: implemented, milestone: M3}
+  - {id: F02, route: "GET|POST /login",                 action: login,           status: implemented, milestone: M3}
+  - {id: F03, route: "GET|POST /account/create",        action: register,        status: implemented, milestone: M3}
+  - {id: F04, route: "GET|POST /logout",                action: logout,          status: implemented, milestone: M3}
+  - {id: F05, route: "GET /account/profile",            action: profile_get,     status: implemented, milestone: M3}
+  - {id: F06, route: "POST /account/profile",           action: profile_update,  status: implemented, milestone: M3}
+  - {id: F07, route: "GET /account/addresses",         action: address_list,    status: implemented, milestone: M3}
+  - {id: F08, route: "POST /account/addresses/new",     action: address_create,  status: implemented, milestone: M3}
+  - {id: F09, route: "GET|POST /account/addresses/{id}/edit", action: address_update, status: implemented, milestone: M3}
+  - {id: F10, route: "POST /account/addresses/{id}/delete",   action: address_delete, status: implemented, milestone: M3}
+  - {id: F11, route: "POST /account/addresses/{id}/default",  action: address_default, status: implemented, milestone: M3}
+  - {id: F12, route: "GET /account/orders",             action: orders_list,      status: implemented, milestone: M3}
+  - {id: F13, route: "GET /account/payment-methods",    action: payment_list,     status: implemented, milestone: M3}
+  - {id: F14, route: "GET|POST /account/activation",    action: activate,         status: implemented, milestone: M4}
+  - {id: F15, route: "GET /account/orders/{id}",        action: order_view,       status: implemented, milestone: M5}
+  - {id: F16, route: "POST /account/payment-methods/add", action: payment_add,    status: implemented, milestone: M6}
+  - {id: F17, route: "POST /account/payment-methods/{id}/delete", action: payment_delete, status: implemented, milestone: M6}
+  - {id: F18, route: "POST /account/payment-methods/{id}/default", action: payment_default, status: implemented, milestone: M6}

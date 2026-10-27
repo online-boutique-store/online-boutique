@@ -28,6 +28,40 @@ def healthz():
     return "ok", 200
 
 
+@app.before_request
+def _legacy_account_api_closed():
+    """ACCOUNT_BACKEND=grpc: the frontend talks to accountservice; these HTTP endpoints must not exist."""
+    if config.ACCOUNT_BACKEND == "grpc" and request.path.startswith(("/account/", "/readyz/accounts")):
+        return jsonify({"error": "not_found"}), 404
+
+
+def _grpc_identity(token):
+    """-> (customer_account|None, profile_available). Identity comes from accountservice only."""
+    import account_client
+    client = accounts.grpc_client()
+    if not token:
+        return None, True
+    try:
+        who = client.resolve(token)
+    except account_client.AccountUnavailable:
+        return None, False
+    if not who:
+        return None, True
+    base = {"customer_id": who["customer_id"], "name": who["first_name"], "email": "", "address": None,
+            "preferred_currency": who["preferred_currency"]}
+    try:
+        prof = client.profile(token)
+        addrs = client.addresses(token)
+    except account_client.AccountUnavailable:
+        return base, False            # still signed in; saved details unavailable
+    default = next((a for a in addrs if a["is_default"]), addrs[0] if addrs else None)
+    base.update(name=f"{prof['first_name']} {prof['last_name']}".strip(), email=prof["email"])
+    if default:
+        base["address"] = {"street_address": default["line1"] + (f", {default['line2']}" if default["line2"] else ""),
+                           "city": default["city"], "state": default["state"], "zip_code": default["zip"], "country": default["country"]}
+    return base, True
+
+
 def _internal_ok():
     expected = os.environ.get("ACCOUNT_API_SECRET", "")
     return bool(expected) and request.headers.get("X-Account-Api-Secret") == expected
@@ -47,13 +81,12 @@ def _account_response(acct):
 def _account_outcome(operation, outcome, acct=None, email="", error_fields=()):
     """Span attrs + metric + log for a website account operation. Synthetic identity only;
     passwords, addresses and session tokens are never recorded."""
-    email = (acct or {}).get("email") or email
+    # No email, name or hash is exported: only the outcome and, for a known customer, the Postgres UUID.
     attrs = {"app.account.operation": operation, "app.account.outcome": outcome,
              "app.account.channel": "web", "app.customer.synthetic": True}
-    if email:
-        attrs["app.customer.email"] = email
-    if acct and acct.get("name"):
-        attrs["app.customer.name"] = acct["name"]
+    cid = tel.customer_uuid((acct or {}).get("customer_id") or (acct or {}).get("id"))
+    if cid:
+        attrs["app.customer.id"] = cid
     if error_fields:
         attrs["app.account.error_fields"] = ",".join(sorted(error_fields))
     span = tel.trace.get_current_span()
@@ -231,28 +264,39 @@ def chat():
 
     session_id = _field(body, "session_id", "X-Session-ID", "anonymous")[:64]
     category = _field(body, "prompt_category", "X-Prompt-Category", "uncategorized")[:48]
-    conversation = _field(body, "conversation_id", "X-Conversation-ID", session_id)[:64]
+    # Never default the conversation to the raw session id: use the opaque reference instead.
+    conversation = _field(body, "conversation_id", "X-Conversation-ID", "")[:64] or tel.session_ref(session_id) or tel.opaque_fallback(session_id)
 
     # Make the customer identity travel on every outgoing gRPC call, like the
     # frontend does for app.session.id.
     auth_token = request.headers.get("X-Account-Session", "")
-    account = accounts.store.session_account(auth_token)  # identity from Redis only
-    profile_available = True
-    if account:
-        try:
-            profile = accounts.store.get(account["email"])
-            if profile:
-                account = profile
-        except accounts.AccountStoreUnavailable:
-            profile_available = False  # keep the logged-in identity; never downgrade to guest
-    account_email = account.get("email") if account else ""
-    token = tel.attach_baggage(**{"app.session.id": session_id, "app.customer.id": session_id,
-                                  "app.prompt.category": category, "app.customer.email": account_email,
-                                  "app.account.authenticated": bool(account)})
+    if config.ACCOUNT_BACKEND == "grpc":
+        public, profile_available = _grpc_identity(auth_token)
+        account = public
+        bag = {"app.session.ref": tel.session_ref(session_id), "app.prompt.category": category,
+               "app.customer.authenticated": bool(public)}
+        if public:
+            bag["app.customer.id"] = public["customer_id"]
+        token = tel.attach_baggage(**bag)
+    else:
+        account = accounts.store.session_account(auth_token)  # identity from Redis only
+        profile_available = True
+        if account:
+            try:
+                profile = accounts.store.get(account["email"])
+                if profile:
+                    account = profile
+            except accounts.AccountStoreUnavailable:
+                profile_available = False  # keep the logged-in identity; never downgrade to guest
+        legacy_id = tel.customer_uuid((account or {}).get("id"))
+        token = tel.attach_baggage(**{**tel.identity_attrs(session_id, legacy_id), "app.prompt.category": category})
     try:
         session = agent.get_session(session_id)
-        session.customer_account = accounts.AccountStore.public_profile(account)
+        session.customer_account = account if config.ACCOUNT_BACKEND == "grpc" else accounts.AccountStore.public_profile(account)
         session.profile_available = profile_available
+        # Forwarded to checkout so orders are attributed server-side; never logged or traced.
+        session.account_token = auth_token if (config.ACCOUNT_BACKEND == "grpc" and account) else ""
+        session.checkout.customer_id = tel.customer_uuid((account or {}).get("customer_id")) if config.ACCOUNT_BACKEND == "grpc" else None
         if account:
             session.pending_activation = False  # a logged-in customer has nothing left to activate
         with session.lock:  # one in-flight prompt per conversation
@@ -270,7 +314,8 @@ def chat():
 
 
 if __name__ == "__main__":
-    accounts.store.start()
+    if config.ACCOUNT_BACKEND != "grpc":
+        accounts.store.start()
     tel.event("assistant.starting", **{
         "llm.provider": "aws.bedrock", "bedrock.model_id": config.BEDROCK_MODEL_ID,
         "aws.region": config.AWS_REGION,

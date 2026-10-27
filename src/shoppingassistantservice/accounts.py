@@ -372,3 +372,22 @@ class AccountStore:
 
 
 store = AccountStore()
+
+
+# --- accountservice client (ACCOUNT_BACKEND=grpc) -------------------------------------------------
+_grpc_client = None
+
+
+def grpc_client():
+    """The shared accountservice client (created lazily so local mode never imports gRPC stubs)."""
+    global _grpc_client
+    if _grpc_client is None:
+        import account_client
+        _grpc_client = account_client.AccountClient()
+    return _grpc_client
+
+
+def set_grpc_client(client):
+    """Test hook."""
+    global _grpc_client
+    _grpc_client = client

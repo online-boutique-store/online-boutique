@@ -340,14 +340,38 @@ def _configure_logging(otlp_logs):
 
 
 def _identity(fields):
-    """AppLogs resolves the customer from attributes["UserId"] (cartservice style)
-    or the JSON body's "session" key (frontend style). Provide both so assistant
-    logs join to Customer_Records without changing that pipeline."""
-    sid = fields.get("app.session.id")
-    if sid:
-        fields.setdefault("UserId", sid)
-        fields.setdefault("session", sid)
+    """Logs carry an opaque per-session reference only. The raw browser session id is never exported
+    (it is a bearer-ish identifier); UserId/session aliases keep the per-session correlation key that
+    log pipelines expect, but hold the HMAC reference instead."""
+    fields.pop("app.session.id", None)          # never export the raw id
+    ref = fields.get("app.session.ref")
+    if ref:
+        fields.setdefault("UserId", ref)
+        fields.setdefault("session", ref)
     return fields
+
+
+_UUID_RE = __import__("re").compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def customer_uuid(value):
+    """The Postgres customer UUID if `value` is one, else None (legacy ids / session ids never qualify)."""
+    v = str(value or "").lower()
+    return v if _UUID_RE.match(v) else None
+
+
+def identity_attrs(session_id, customer_id=None):
+    """The only identity attributes the assistant exports: app.session.ref, and app.customer.id +
+    app.customer.authenticated for a signed-in customer (Postgres UUID). No name, email or hash."""
+    out = {}
+    ref = session_ref(session_id)
+    if ref:
+        out["app.session.ref"] = ref
+    cid = customer_uuid(customer_id)
+    out["app.customer.authenticated"] = bool(cid)
+    if cid:
+        out["app.customer.id"] = cid
+    return out
 
 
 def event(message, **fields):
@@ -376,12 +400,36 @@ def stamp_app_attrs(span=None):
             # user attributes, so mirror our app.* identity onto every span in the turn.
             for std_key in _STANDARD_MIRRORS.get(key, ()):
                 span.set_attribute(std_key, value)
+    # Standard user attributes: the signed-in customer's UUID, else the opaque session reference.
+    bag = baggage.get_all()
+    who = bag.get("app.customer.id") or bag.get("app.session.ref")
+    if who:
+        span.set_attribute("user.id", who)
+        span.set_attribute("enduser.id", who)
 
 
 _STANDARD_MIRRORS = {
     "app.conversation.id": ("gen_ai.conversation.id",),
-    "app.customer.id": ("user.id", "enduser.id"),
 }
+
+_PROCESS_KEY = __import__("os").urandom(16)
+
+
+def opaque_fallback(session_id):
+    """Stable-within-process opaque id used only when TELEMETRY_REF_KEY is not configured."""
+    import hashlib
+    import hmac
+    return hmac.new(_PROCESS_KEY, str(session_id).encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def session_ref(session_id):
+    """Opaque, stable reference for a browser session (HMAC, 16 hex chars). Empty without TELEMETRY_REF_KEY."""
+    import hashlib
+    import hmac
+    key = os.environ.get("TELEMETRY_REF_KEY", "")
+    if not session_id or not key:
+        return ""
+    return hmac.new(key.encode(), str(session_id).encode(), hashlib.sha256).hexdigest()[:16]
 
 
 def attach_baggage(**entries):

@@ -1,0 +1,319 @@
+{{ define "acct_nav" }}
+<nav class="acct-nav" aria-label="Account">
+  <a href="{{ $.baseUrl }}/account" {{ if eq $.nav "dashboard" }}class="active"{{ end }}>Overview</a>
+  <a href="{{ $.baseUrl }}/account/profile" {{ if eq $.nav "profile" }}class="active"{{ end }}>Profile</a>
+  <a href="{{ $.baseUrl }}/account/addresses" {{ if eq $.nav "addresses" }}class="active"{{ end }}>Addresses</a>
+  <a href="{{ $.baseUrl }}/account/orders" {{ if eq $.nav "orders" }}class="active"{{ end }}>Orders</a>
+  <a href="{{ $.baseUrl }}/account/payment-methods" {{ if eq $.nav "payments" }}class="active"{{ end }}>Payment methods</a>
+</nav>
+{{ end }}
+
+{{ define "acct_field" }}
+{{/* args: dict with name, label, value, errors, type, autocomplete, hint */}}
+<div class="acct-field {{ if index .errors .name }}has-error{{ end }}">
+  <label for="f_{{ .name }}">{{ .label }}</label>
+  <input id="f_{{ .name }}" name="{{ .name }}" type="{{ if .type }}{{ .type }}{{ else }}text{{ end }}" value="{{ .value }}"
+         {{ if .autocomplete }}autocomplete="{{ .autocomplete }}"{{ end }} {{ if .inputmode }}inputmode="{{ .inputmode }}"{{ end }}
+         {{ if .maxlength }}maxlength="{{ .maxlength }}"{{ end }} {{ if .required }}required{{ end }}
+         {{ if index .errors .name }}aria-invalid="true" aria-describedby="e_{{ .name }}"{{ end }}>
+  {{ if .hint }}<small class="acct-hint">{{ .hint }}</small>{{ end }}
+  {{ if index .errors .name }}<small class="acct-field-error" id="e_{{ .name }}" role="alert">{{ index .errors .name }}</small>{{ end }}
+</div>
+{{ end }}
+
+{{ define "acct_state_select" }}
+<div class="acct-field {{ if index .errors "state" }}has-error{{ end }}">
+  <label for="f_state">State</label>
+  <select id="f_state" name="state" autocomplete="address-level1" required {{ if index .errors "state" }}aria-invalid="true"{{ end }}>
+    <option value="">Select a state</option>
+    {{ $cur := .value }}{{ range .states }}<option value="{{ . }}" {{ if eq . $cur }}selected{{ end }}>{{ . }}</option>{{ end }}
+  </select>
+  {{ if index .errors "state" }}<small class="acct-field-error" role="alert">{{ index .errors "state" }}</small>{{ end }}
+</div>
+{{ end }}
+
+{{ define "acct_login" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  <h1>{{ .title }}</h1>
+  {{ if .notice }}<p class="acct-notice" role="status">{{ .notice }}</p>{{ end }}
+  {{ if .error }}<p class="account-error" role="alert">{{ .error }}</p>{{ end }}
+  <form method="post" action="{{ .baseUrl }}/login" class="acct-form">
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    <input type="hidden" name="next" value="{{ .next }}">
+    <div class="acct-field"><label for="f_email">Email</label>
+      <input id="f_email" type="email" name="email" value="{{ index .values "email" }}" autocomplete="username" required></div>
+    <div class="acct-field"><label for="f_password">Password</label>
+      <input id="f_password" type="password" name="password" autocomplete="current-password" required></div>
+    <button type="submit" class="cymbal-button-primary">Log in</button>
+  </form>
+  <p class="acct-alt">New here? <a href="{{ .baseUrl }}/account/create">Create an account</a></p>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_signup" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  <h1>{{ .title }}</h1>
+  {{ if .error }}<p class="account-error" role="alert">{{ .error }}</p>{{ end }}
+  <form method="post" action="{{ .baseUrl }}/account/create" class="acct-form" novalidate>
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    {{ $v := .values }}{{ $e := .field_errors }}
+    <fieldset><legend>About you</legend>
+      {{ template "acct_field" (dict "name" "first_name" "label" "First name" "value" (index $v "first_name") "errors" $e "autocomplete" "given-name" "maxlength" "100" "required" true) }}
+      {{ template "acct_field" (dict "name" "last_name" "label" "Last name" "value" (index $v "last_name") "errors" $e "autocomplete" "family-name" "maxlength" "100" "required" true) }}
+      {{ template "acct_field" (dict "name" "email" "label" "Email" "type" "email" "value" (index $v "email") "errors" $e "autocomplete" "email" "maxlength" "254" "required" true "hint" "A full address with a domain ending such as .com, .edu or .org.") }}
+      {{ template "acct_field" (dict "name" "phone" "label" "Phone (US)" "type" "tel" "value" (index $v "phone") "errors" $e "autocomplete" "tel" "inputmode" "tel" "required" true "hint" "For example (415) 555-2671. Extensions aren't supported.") }}
+    </fieldset>
+    <fieldset><legend>Address</legend>
+      {{ template "acct_field" (dict "name" "address_line1" "label" "Street address" "value" (index $v "address_line1") "errors" $e "autocomplete" "address-line1" "maxlength" "100" "required" true) }}
+      {{ template "acct_field" (dict "name" "address_line2" "label" "Apartment, suite, etc. (optional)" "value" (index $v "address_line2") "errors" $e "autocomplete" "address-line2" "maxlength" "100") }}
+      {{ template "acct_field" (dict "name" "city" "label" "City" "value" (index $v "city") "errors" $e "autocomplete" "address-level2" "maxlength" "64" "required" true) }}
+      {{ template "acct_state_select" (dict "value" (index $v "state") "errors" $e "states" .states) }}
+      {{ template "acct_field" (dict "name" "zip" "label" "ZIP code" "value" (index $v "zip") "errors" $e "autocomplete" "postal-code" "inputmode" "numeric" "maxlength" "10" "required" true) }}
+      <input type="hidden" name="country" value="US">
+      <small class="acct-hint">US addresses only for now. PO boxes are accepted.</small>
+    </fieldset>
+    <fieldset><legend>Sign-in</legend>
+      <div class="acct-field {{ if index $e "password" }}has-error{{ end }}"><label for="f_password">Password</label>
+        <input id="f_password" type="password" name="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+        {{ if index $e "password" }}<small class="acct-field-error" role="alert">{{ index $e "password" }}</small>{{ end }}</div>
+      <div class="acct-field {{ if index $e "confirm_password" }}has-error{{ end }}"><label for="f_confirm_password">Confirm password</label>
+        <input id="f_confirm_password" type="password" name="confirm_password" autocomplete="new-password" required>
+        {{ if index $e "confirm_password" }}<small class="acct-field-error" role="alert">{{ index $e "confirm_password" }}</small>{{ end }}</div>
+      <div class="acct-field"><label for="f_cur">Preferred currency</label>
+        <select id="f_cur" name="preferred_currency">{{ $cur := index $v "preferred_currency" }}{{ range .currencies_list }}<option value="{{ . }}" {{ if eq . $cur }}selected{{ end }}>{{ . }}</option>{{ end }}</select></div>
+    </fieldset>
+    <button type="submit" class="cymbal-button-primary">Create account</button>
+  </form>
+  <p class="acct-alt">Already have an account? <a href="{{ .baseUrl }}/login">Log in</a></p>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_activation" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  <h1>{{ .title }}</h1>
+  {{ if .error }}<p class="account-error" role="alert">{{ .error }}</p>{{ end }}
+  {{ if .pending }}
+  <p>Finish activating the account you started in the assistant{{ if .email }} for <strong>{{ .email }}</strong>{{ end }} by choosing a password.</p>
+  <form method="post" action="{{ .baseUrl }}/account/activation" class="acct-form">
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    <div class="acct-field {{ if index .field_errors "password" }}has-error{{ end }}"><label for="f_password">Password</label>
+      <input id="f_password" type="password" name="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+      {{ if index .field_errors "password" }}<small class="acct-field-error" role="alert">{{ index .field_errors "password" }}</small>{{ end }}</div>
+    <button type="submit" class="cymbal-button-primary">Complete account setup</button>
+  </form>
+  {{ end }}
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_logout" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  <h1>Sign out</h1>
+  <p>Do you want to sign out of your account?</p>
+  <form method="post" action="{{ .baseUrl }}/logout" class="acct-form">
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    <button type="submit" class="cymbal-button-primary">Sign out</button>
+    <a href="{{ .baseUrl }}/account">Cancel</a>
+  </form>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_unavailable" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  <h1>{{ .title }}</h1>
+  {{ if .not_found }}
+  <p>We couldn't find {{ .what }}.</p>
+  {{ else }}
+  <p role="alert">We couldn't load {{ .what }} right now. You're still signed in; please try again in a moment.</p>
+  {{ end }}
+  <p><a href="{{ .baseUrl }}/account">Back to my account</a> &middot; <a href="{{ .baseUrl }}/">Continue shopping</a></p>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_dashboard" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  {{ template "acct_nav" . }}
+  <h1>{{ if .p.Profile }}Welcome back, {{ .p.Profile.FirstName }}{{ else }}My account{{ end }}</h1>
+  {{ if .p.Profile }}{{ if not .p.Profile.ProfileComplete }}
+  <p class="acct-banner" role="status">Your profile is missing a few details
+    ({{ range $i, $f := .p.Profile.MissingFields }}{{ if $i }}, {{ end }}{{ if eq $f "phone" }}phone number{{ else if eq $f "first_name" }}first name{{ else if eq $f "last_name" }}last name{{ else }}{{ $f }}{{ end }}{{ end }}).
+    <a href="{{ .baseUrl }}/account/profile">Complete your profile</a></p>
+  {{ end }}{{ end }}
+  <div class="acct-grid">
+    <section class="acct-card"><h2>Profile</h2>
+      {{ if .p.Profile }}
+      <p>{{ .p.Profile.FirstName }} {{ .p.Profile.LastName }}<br>{{ .p.Profile.EmailDisplay }}<br>{{ if .p.Profile.PhoneDisplay }}{{ .p.Profile.PhoneDisplay }}{{ else }}<em>No phone number yet</em>{{ end }}</p>
+      <a href="{{ .baseUrl }}/account/profile">Edit profile</a>
+      {{ else }}<p class="acct-unavailable">Your profile is temporarily unavailable.</p>{{ end }}
+    </section>
+    <section class="acct-card"><h2>Default address</h2>
+      {{ if .p.AddressesErr }}<p class="acct-unavailable">Your saved addresses are temporarily unavailable.</p>
+      {{ else if .default_address }}
+      <p>{{ .default_address.Line1 }}{{ if .default_address.Line2 }}, {{ .default_address.Line2 }}{{ end }}<br>{{ .default_address.City }}, {{ .default_address.State }} {{ .default_address.Zip }}</p>
+      {{ else }}<p><em>No saved address yet.</em></p>{{ end }}
+      <a href="{{ .baseUrl }}/account/addresses">Manage addresses</a>
+    </section>
+    <section class="acct-card"><h2>Recent orders</h2>
+      {{ if .p.OrdersErr }}<p class="acct-unavailable">Your orders are temporarily unavailable. Try again shortly.</p>
+      {{ else if .p.Orders }}
+      <ul>{{ range .p.Orders }}<li><a href="{{ $.baseUrl }}/account/orders/{{ .OrderId }}">Order {{ .OrderId }}</a></li>{{ end }}</ul>
+      {{ else }}<p><em>No orders yet.</em></p>{{ end }}
+      {{ if .p.OrdersPending }}<p class="acct-hint">Recent orders may take a moment to appear.</p>{{ end }}
+      <a href="{{ .baseUrl }}/account/orders">View order history</a>
+    </section>
+    <section class="acct-card"><h2>Payment methods</h2>
+      {{ if .p.PaymentsErr }}<p class="acct-unavailable">Your payment methods are temporarily unavailable.</p>
+      {{ else if .p.Payments }}
+      <ul>{{ range .p.Payments }}<li>{{ .Brand }} ending {{ .Last4 }}{{ if .IsDefault }} (default){{ end }}</li>{{ end }}</ul>
+      {{ else }}<p><em>No saved payment methods.</em></p>{{ end }}
+      <a href="{{ .baseUrl }}/account/payment-methods">Manage payment methods</a>
+    </section>
+  </div>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_profile" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  {{ template "acct_nav" . }}
+  <h1>{{ .title }}</h1>
+  {{ if .profile }}<p class="acct-hint">Email: <strong>{{ .profile.EmailDisplay }}</strong> (the email address can't be changed here).</p>{{ end }}
+  <form method="post" action="{{ .baseUrl }}/account/profile" class="acct-form">
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    {{ $v := .values }}{{ $e := .field_errors }}
+    {{ template "acct_field" (dict "name" "first_name" "label" "First name" "value" (index $v "first_name") "errors" $e "autocomplete" "given-name" "maxlength" "100" "required" true) }}
+    {{ template "acct_field" (dict "name" "last_name" "label" "Last name" "value" (index $v "last_name") "errors" $e "autocomplete" "family-name" "maxlength" "100" "required" true) }}
+    {{ template "acct_field" (dict "name" "phone" "label" "Phone (US)" "type" "tel" "value" (index $v "phone") "errors" $e "autocomplete" "tel" "inputmode" "tel" "required" true "hint" "For example (415) 555-2671.") }}
+    <div class="acct-field"><label for="f_cur">Preferred currency</label>
+      <select id="f_cur" name="preferred_currency">{{ $cur := index $v "preferred_currency" }}{{ range .currencies_list }}<option value="{{ . }}" {{ if eq . $cur }}selected{{ end }}>{{ . }}</option>{{ end }}</select></div>
+    <button type="submit" class="cymbal-button-primary">Save profile</button>
+  </form>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_addresses" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  {{ template "acct_nav" . }}
+  <h1>{{ .title }}</h1>
+  {{ if .notice }}<p class="acct-notice" role="status">{{ if eq .notice "saved" }}Address saved.{{ else if eq .notice "delete" }}Address removed.{{ else if eq .notice "default" }}Default address updated.{{ end }}</p>{{ end }}
+  {{ if .addresses }}
+  <div class="acct-grid">
+  {{ range .addresses }}
+    <section class="acct-card">
+      <h2>{{ if .Label }}{{ .Label }}{{ else }}Address{{ end }}{{ if .IsDefault }} <span class="acct-badge">Default</span>{{ end }}{{ if .IsPoBox }} <span class="acct-badge">PO Box</span>{{ end }}</h2>
+      <p>{{ .Line1 }}{{ if .Line2 }}, {{ .Line2 }}{{ end }}<br>{{ .City }}, {{ .State }} {{ .Zip }}</p>
+      <a href="{{ $.baseUrl }}/account/addresses/{{ .Id }}/edit">Edit</a>
+      <form method="post" action="{{ $.baseUrl }}/account/addresses/{{ .Id }}/delete" class="acct-inline"><input type="hidden" name="csrf" value="{{ $.csrf }}"><button type="submit" class="acct-link">Delete</button></form>
+      {{ if not .IsDefault }}<form method="post" action="{{ $.baseUrl }}/account/addresses/{{ .Id }}/default" class="acct-inline"><input type="hidden" name="csrf" value="{{ $.csrf }}"><button type="submit" class="acct-link">Make default</button></form>{{ end }}
+    </section>
+  {{ end }}
+  </div>
+  {{ else }}<p><em>You have no saved addresses.</em></p>{{ end }}
+  <p><a class="cymbal-button-primary" href="{{ .baseUrl }}/account/addresses/new">Add an address</a></p>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_address_form" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  {{ template "acct_nav" . }}
+  <h1>{{ .title }}</h1>
+  {{ if .error }}<p class="account-error" role="alert">{{ .error }}</p>{{ end }}
+  <form method="post" action="{{ if .address_id }}{{ .baseUrl }}/account/addresses/{{ .address_id }}/edit{{ else }}{{ .baseUrl }}/account/addresses/new{{ end }}" class="acct-form" novalidate>
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    {{ $v := .values }}{{ $e := .field_errors }}
+    {{ template "acct_field" (dict "name" "label" "label" "Label (optional, e.g. Home)" "value" (index $v "label") "errors" $e "maxlength" "40") }}
+    {{ template "acct_field" (dict "name" "address_line1" "label" "Street address" "value" (index $v "address_line1") "errors" $e "autocomplete" "address-line1" "maxlength" "100" "required" true) }}
+    {{ template "acct_field" (dict "name" "address_line2" "label" "Apartment, suite, etc. (optional)" "value" (index $v "address_line2") "errors" $e "autocomplete" "address-line2" "maxlength" "100") }}
+    {{ template "acct_field" (dict "name" "city" "label" "City" "value" (index $v "city") "errors" $e "autocomplete" "address-level2" "maxlength" "64" "required" true) }}
+    {{ template "acct_state_select" (dict "value" (index $v "state") "errors" $e "states" .states) }}
+    {{ template "acct_field" (dict "name" "zip" "label" "ZIP code" "value" (index $v "zip") "errors" $e "autocomplete" "postal-code" "inputmode" "numeric" "maxlength" "10" "required" true) }}
+    <input type="hidden" name="country" value="US">
+    {{ if not .address_id }}<label class="acct-check"><input type="checkbox" name="make_default"> Make this my default address</label>{{ end }}
+    <button type="submit" class="cymbal-button-primary">Save address</button>
+    <a href="{{ .baseUrl }}/account/addresses">Cancel</a>
+  </form>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_orders" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  {{ template "acct_nav" . }}
+  <h1>{{ .title }}</h1>
+  {{ if .pending }}<p class="acct-banner" role="status">Recent orders may take a moment to appear.</p>{{ end }}
+  {{ if .orders }}
+  <table class="acct-table"><thead><tr><th>Placed</th><th>Items</th><th>Total</th><th>Status</th><th></th></tr></thead><tbody>
+  {{ range .orders }}<tr><td>{{ date .PlacedAt }}</td><td>{{ range $i, $n := .ItemNames }}{{ if $i }}, {{ end }}{{ $n }}{{ end }}</td><td>{{ renderMoney .Total }}</td><td>{{ .Status }}</td>
+    <td><a href="{{ $.baseUrl }}/account/orders/{{ .OrderId }}">Details</a></td></tr>{{ end }}
+  </tbody></table>
+  {{ if .next_cursor }}<p><a href="{{ .baseUrl }}/account/orders?cursor={{ .next_cursor }}">Older orders</a></p>{{ end }}
+  {{ else }}<p><em>You haven't placed any orders yet.</em> <a href="{{ .baseUrl }}/">Start shopping</a></p>{{ end }}
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_order" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  {{ template "acct_nav" . }}
+  <h1>Order details</h1>
+  <p class="acct-hint">Order {{ .order.OrderId }} &middot; placed {{ date .order.PlacedAt }} &middot; {{ .order.Status }}</p>
+  <table class="acct-table"><thead><tr><th>Item</th><th>Qty</th><th>Price</th></tr></thead><tbody>
+  {{ range .order.Items }}<tr><td>{{ .Name }}</td><td>{{ .Quantity }}</td><td>{{ renderMoney .UnitPrice }}</td></tr>{{ end }}
+  </tbody></table>
+  <p>Subtotal {{ renderMoney .order.Subtotal }} &middot; Shipping {{ renderMoney .order.Shipping }} &middot; <strong>Total {{ renderMoney .order.Total }}</strong></p>
+  {{ if .order.ShipTo }}<p>Shipped to: {{ .order.ShipTo.Line1 }}{{ if .order.ShipTo.Line2 }}, {{ .order.ShipTo.Line2 }}{{ end }}, {{ .order.ShipTo.City }}, {{ .order.ShipTo.State }} {{ .order.ShipTo.Zip }}</p>{{ end }}
+  {{ if .order.TrackingId }}<p>Tracking: {{ .order.TrackingId }}</p>{{ end }}
+  {{ if .order.PaymentBrand }}<p>Paid with {{ .order.PaymentBrand }} ending {{ .order.PaymentLast4 }}</p>{{ end }}
+  <p><a href="{{ .baseUrl }}/account/orders">Back to order history</a></p>
+</main>
+{{ template "footer" . }}
+{{ end }}
+
+{{ define "acct_payments" }}
+{{ template "header" . }}
+<main class="container py-5 acct">
+  {{ template "acct_nav" . }}
+  <h1>{{ .title }}</h1>
+  {{ if .notice }}<p class="acct-notice" role="status">{{ if eq .notice "added" }}Payment method added.{{ else if eq .notice "delete" }}Payment method removed.{{ else if eq .notice "default" }}Default payment method updated.{{ end }}</p>{{ end }}
+  {{ if .error }}<p class="acct-error" role="alert">{{ .error }}</p>{{ end }}
+  {{ if .methods }}
+  <ul class="acct-list">{{ range .methods }}
+    <li>{{ .Brand }} ending {{ .Last4 }} (exp {{ .ExpMonth }}/{{ .ExpYear }}){{ if .IsDefault }} &mdash; default{{ end }}
+      <form method="post" action="{{ $.baseUrl }}/account/payment-methods/{{ .Id }}/delete" class="acct-inline"><input type="hidden" name="csrf" value="{{ $.csrf }}"><button type="submit" class="acct-link">Remove</button></form>
+      {{ if not .IsDefault }}<form method="post" action="{{ $.baseUrl }}/account/payment-methods/{{ .Id }}/default" class="acct-inline"><input type="hidden" name="csrf" value="{{ $.csrf }}"><button type="submit" class="acct-link">Make default</button></form>{{ end }}
+    </li>{{ end }}
+  </ul>
+  {{ else }}<p><em>You have no saved payment methods.</em></p>{{ end }}
+  {{ if .catalog }}
+  <h2>Add a payment method</h2>
+  <form method="post" action="{{ $.baseUrl }}/account/payment-methods/add" class="acct-form">
+    <input type="hidden" name="csrf" value="{{ $.csrf }}">
+    <label for="catalog_id">Demo test card</label>
+    <select id="catalog_id" name="catalog_id" required>
+      {{ range .catalog }}<option value="{{ .CatalogId }}">{{ .DisplayName }}</option>{{ end }}
+    </select>
+    <label class="acct-check"><input type="checkbox" name="make_default"> Make this my default</label>
+    <button type="submit" class="cymbal-button-primary">Add card</button>
+  </form>
+  {{ end }}
+  <p class="acct-hint">This demo only accepts synthetic test cards. No real card numbers are collected or stored.</p>
+</main>
+{{ template "footer" . }}
+{{ end }}

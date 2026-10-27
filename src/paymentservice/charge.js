@@ -14,8 +14,10 @@
 
 const cardValidator = require('simple-card-validator');
 const { v4: uuidv4 } = require('uuid');
+const api = require('@opentelemetry/api');
 const { createLogger } = require('./logger');
-const { stampAppAttrs } = require('./otel');
+const { stampAppAttrs, setAppAttr } = require('./otel');
+const idem = require('./idempotency');
 
 const logger = createLogger('paymentservice-charge');
 
@@ -23,7 +25,8 @@ const logger = createLogger('paymentservice-charge');
 class CreditCardError extends Error {
   constructor (message) {
     super(message);
-    this.code = 400; // Invalid argument error
+    this.code = 400;
+    this.declined = true; // definitive: the card was NOT charged
   }
 }
 
@@ -45,47 +48,86 @@ class ExpiredCreditCard extends CreditCardError {
   }
 }
 
+const catalog = require('./catalog');
+
 /**
- * Verifies the credit card number and (pretend) charges the card.
+ * Verifies the card (or demo token) and (pretend) charges it.
  *
- * @param {*} request
- * @return transaction_id - a random uuid.
+ * With an idempotency key the charge is recorded durably first: a repeat returns the ORIGINAL
+ * transaction id with replayed=true and never charges twice. Card numbers, CVVs and tokens are never
+ * logged or put on spans.
  */
-module.exports = function charge (request) {
+module.exports = async function charge (request) {
   stampAppAttrs();
-  const { amount, credit_card: creditCard } = request;
-  const cardNumber = creditCard.credit_card_number;
-  const cardInfo = cardValidator(cardNumber);
-  const {
-    card_type: cardType,
-    valid
-  } = cardInfo.getCardDetails();
-
-  if (!valid) { throw new InvalidCreditCard(); }
-
-  // Only VISA and mastercard is accepted, other card types (AMEX, dinersclub) will
-  // throw UnacceptedCreditCard error.
-  if (!(cardType === 'visa' || cardType === 'mastercard')) { throw new UnacceptedCreditCard(cardType); }
-
-  // Also validate expiration is > today.
-  const currentMonth = new Date().getMonth() + 1;
-  const currentYear = new Date().getFullYear();
-  const { credit_card_expiration_year: year, credit_card_expiration_month: month } = creditCard;
-  if ((currentYear * 12 + currentMonth) > (year * 12 + month)) { throw new ExpiredCreditCard(cardNumber.replace('-', ''), month, year); }
-
-  logger.info(`Transaction processed: ${cardType} ending ${cardNumber.substr(-4)} \
-    Amount: ${amount.currency_code}${amount.units}.${amount.nanos}`);
-
-  const transaction_id = uuidv4();
-  // Stamp the originating payment attributes onto this span. card_type is
-  // not returned to checkout, so it only lives here; transaction_id is
-  // returned and checkout re-injects it into baggage for downstream spans.
-  const api = require('@opentelemetry/api');
-  const span = api.trace.getActiveSpan();
-  if (span) {
-    span.setAttribute('app.payment.transaction_id', transaction_id);
-    span.setAttribute('app.payment.card_type', cardType);
+  const { amount, credit_card: creditCard, idempotency_key: key, payment_token: token } = request;
+  let cardType = 'token';
+  let last4 = '';
+  if (token) {
+    // The token must be one this service issued: it resolves to a catalog entry server-side.
+    if (!catalog.TOKEN_RE.test(token) || !idem.enabled()) { throw new InvalidCreditCard(); }
+    let catalogId;
+    try {
+      catalogId = await idem.resolveToken(token);
+    } catch (e) {
+      const err = new Error('payment_record_unavailable');
+      err.unavailable = true;
+      throw err;
+    }
+    const card = catalog.entry(catalogId);
+    if (!card) { throw new InvalidCreditCard(); }
+    cardType = card.brand;
+    last4 = card.last4;
+    setAppAttr('app.payment.method_type', 'demo_card_saved');
+  } else {
+    const cardNumber = creditCard.credit_card_number;
+    const cardInfo = cardValidator(cardNumber);
+    const details = cardInfo.getCardDetails();
+    cardType = details.card_type;
+    if (!details.valid) { throw new InvalidCreditCard(); }
+    // Only VISA and mastercard is accepted, other card types (AMEX, dinersclub) will
+    // throw UnacceptedCreditCard error.
+    if (!(cardType === 'visa' || cardType === 'mastercard')) { throw new UnacceptedCreditCard(cardType); }
+    const currentMonth = new Date().getMonth() + 1;
+    const currentYear = new Date().getFullYear();
+    const { credit_card_expiration_year: year, credit_card_expiration_month: month } = creditCard;
+    if ((currentYear * 12 + currentMonth) > (year * 12 + month)) { throw new ExpiredCreditCard(cardNumber.replace('-', ''), month, year); }
+    last4 = cardNumber.replace(/\D/g, '').slice(-4);
+    setAppAttr('app.payment.method_type', 'card_form');
   }
 
-  return { transaction_id };
+  let transaction_id;
+  let replayed = false;
+  if (key) {
+    if (!idem.enabled()) { const e = new Error('idempotent charges require ORDER_QUEUE_ADDR'); e.unavailable = true; throw e; }
+    let rec;
+    try {
+      rec = await idem.record(key, amount);
+    } catch (e) {
+      const err = new Error('payment_record_unavailable');
+      err.unavailable = true;
+      throw err;
+    }
+    const amt = `${amount.currency_code}:${amount.units}.${amount.nanos}`;
+    if (rec.replayed && rec.amount !== amt) {
+      const err = new Error('idempotency_mismatch');
+      err.failedPrecondition = true;
+      throw err;
+    }
+    transaction_id = rec.txn;
+    replayed = rec.replayed;
+    if (!replayed && idem.testFault() === 'exit_after_record') { process.exit(1); }
+    if (!replayed && idem.testFault().startsWith('slow_after_record')) {
+      await new Promise((r) => setTimeout(r, Number(idem.testFault().split(':')[1] || 12000)));
+    }
+  } else {
+    transaction_id = uuidv4();
+  }
+  logger.info(`Transaction processed: ${cardType}${last4 ? ` ending ${last4}` : ''} replayed=${replayed}`);
+  setAppAttr('app.payment.status', 'charged');
+  setAppAttr('app.payment.provider', 'demo-psp');
+  const span = api.trace.getActiveSpan();
+  if (span) { span.setAttribute('app.payment.transaction_id', transaction_id); }
+  return { transaction_id, replayed };
 };
+
+module.exports.CreditCardError = CreditCardError;

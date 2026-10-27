@@ -398,7 +398,7 @@ def test_identity_preserved_and_guest_checkout_during_outage():
         assert c.get("/healthz").status_code == 200
         # checkout for the logged-in customer: unavailable, NOT silently a guest
         checkout.backends.cart_contents = lambda uid: ([{"product_id": "P1", "name": "Mug", "quantity": 1, "unit_price_usd": 8.0}], 8.0)
-        checkout.backends.place_order = lambda uid, cur, email, addr, card: {"order_id": "ord-1"}
+        checkout.backends.place_order = lambda uid, cur, email, addr, card, **kw: {"order_id": "ord-1"}
 
         class S:
             id, turns = "sess-1", 0

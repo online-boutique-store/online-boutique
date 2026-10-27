@@ -25,21 +25,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// stampAppAttrs copies every app.* baggage entry onto the current span.
-// Call this at the entry of every handler so each span carries all
-// attributes that exist at that point in the request flow.
-func stampAppAttrs(ctx context.Context) {
-	span := trace.SpanFromContext(ctx)
-	if !span.SpanContext().IsValid() {
-		return
-	}
-	for _, m := range baggage.FromContext(ctx).Members() {
-		if strings.HasPrefix(m.Key(), "app.") {
-			span.SetAttributes(attribute.String(m.Key(), m.Value()))
-		}
-	}
-}
-
 // withBaggage returns a context with the given app.* key/value added to the
 // baggage, so downstream gRPC calls (which use the same context) propagate it.
 func withBaggage(ctx context.Context, key, value string) context.Context {

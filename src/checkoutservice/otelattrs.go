@@ -16,26 +16,12 @@ package main
 
 import (
 	"context"
-	"strings"
 
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice/genproto"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
 )
-
-// stampAppAttrs copies every app.* baggage entry onto the current span.
-func stampAppAttrs(ctx context.Context) {
-	span := trace.SpanFromContext(ctx)
-	if !span.SpanContext().IsValid() {
-		return
-	}
-	for _, m := range baggage.FromContext(ctx).Members() {
-		if strings.HasPrefix(m.Key(), "app.") {
-			span.SetAttributes(attribute.String(m.Key(), m.Value()))
-		}
-	}
-}
 
 func withBaggage(ctx context.Context, key, value string) context.Context {
 	if value == "" {

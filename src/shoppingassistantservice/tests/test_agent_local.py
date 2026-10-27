@@ -10,6 +10,7 @@ import sys
 
 # The botocore Bedrock instrumentation only accepts the literal "true" (verified).
 os.environ["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = "true"
+os.environ["TELEMETRY_REF_KEY"] = "test-ref-key"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.dirname(HERE)]
 
@@ -33,6 +34,7 @@ fakes.start_backends()
 fakes.start_fake_bedrock()
 
 import config
+import telemetry as tel
 config.RATE_LIMIT_RPM = 0  # the guided checkout needs many LLM calls per minute
 import shoppingassistantservice as svc
 
@@ -97,7 +99,9 @@ check(grpc_server and grpc_server[0].parent.span_id == grpc_client[0].context.sp
 check(body["trace_id"] == format(agent.context.trace_id, "032x"), "A response trace_id matches the trace")
 a = agent.attributes
 check(a["gen_ai.operation.name"] == "invoke_agent" and a["gen_ai.agent.name"] == "shopping_assistant", "A agent span gen_ai attrs")
-check(a["prompt.version"] == "v1" and a["app.prompt.category"] == "browse" and a["app.session.id"] == SID and a["app.customer.id"] == SID, "A agent span app.* + prompt.version")
+check(a["prompt.version"] == "v1" and a["app.prompt.category"] == "browse" and a["app.session.ref"] == tel.session_ref(SID) and "app.session.id" not in a
+      and "app.customer.id" not in a and a["app.customer.authenticated"] is False,
+      "A agent span app.* + prompt.version; opaque session ref, no raw session id")
 check("find me a mug" in a.get("gen_ai.input.messages", "").lower(), "A agent span captured standard input messages")
 check(a.get("gen_ai.prompt.0.role") == "user" and "Find me a mug" in a.get("gen_ai.prompt.0.content", "")
       and "gen_ai.prompt.1.role" not in a,
@@ -120,8 +124,8 @@ c0 = chats[0].attributes
 conv = a["gen_ai.conversation.id"]
 check(all(s.attributes.get("gen_ai.conversation.id") == conv for s in [*chats, tool]),
       "A chat + execute_tool spans carry gen_ai.conversation.id")
-check(all(s.attributes.get("user.id") == SID for s in [agent, *chats, tool]),
-      "A agent/chat/tool spans carry user.id")
+check(all(s.attributes.get("user.id") == tel.session_ref(SID) for s in [agent, *chats, tool]),
+      "A agent/chat/tool spans carry user.id = opaque session ref for guests")
 check(c0.get("gen_ai.request.model") == config.BEDROCK_MODEL_ID and c0.get("gen_ai.usage.input_tokens") == 120, "A chat span model + usage")
 check(c0.get("gen_ai.provider.name") == "aws.bedrock", "A chat span gen_ai.provider.name=aws.bedrock (hook)")
 check(chats[0].kind == trace.SpanKind.CLIENT, "A chat span is a CLIENT span")
@@ -139,7 +143,20 @@ check('"tool_call"' in c0.get("gen_ai.output.messages", "") and "search_products
 check("tool_call_response" in chats[1].attributes.get("gen_ai.input.messages", ""), "A 2nd chat span carries the tool result in its input")
 check(tool.attributes["gen_ai.tool.name"] == "search_products" and '"query": "mug"' in tool.attributes["gen_ai.tool.call.arguments"], "A tool span name + arguments")
 check("6E92ZMYYFZ" in tool.attributes["gen_ai.tool.call.result"], "A tool span result")
-check(any(b.get("app.session.id") == SID and b.get("app.customer.id") == SID for b in fakes.SEEN_BAGGAGE), "A baggage reached backend")
+check(any(b.get("app.session.ref") == tel.session_ref(SID) for b in fakes.SEEN_BAGGAGE)
+      and not any(k in b for b in fakes.SEEN_BAGGAGE for k in ("app.session.id", "app.customer.email", "app.customer.name")),
+      "A baggage reached backend carries the opaque session ref and no raw id / email / name")
+
+# ---- A2: order-history tools are classified and dispatched; guests are told to log in (no error)
+code, body, spans = ask("c1a1f2b0-00a2-4a4a-9c1a-1a2b3c4d5e0a", "show my orders", "account")
+ot = [s for s in spans if s.name.startswith("execute_tool") and s.attributes.get("gen_ai.tool.name") == "list_orders"]
+check(code == 200 and len(ot) == 1 and ot[0].attributes["traceloop.span.kind"] == "tool"
+      and "login_required" in ot[0].attributes["gen_ai.tool.call.result"]
+      and ot[0].status.status_code != trace.StatusCode.ERROR,
+      "A2 list_orders runs as a tool span; guest gets login_required, not an error")
+check("log in" in body["content"].lower(), "A2 reply tells the guest to log in")
+check(not any(k in ot[0].attributes for k in ("app.customer.email", "app.customer.name", "app.session.id")),
+      "A2 tool span has no email / name / raw session id")
 
 # ---- B: guided checkout, NEW customer, v1 (healthy)
 import accounts
@@ -167,11 +184,11 @@ check(alk.parent.span_id == lk.context.span_id and acr.parent.span_id == cr.cont
       "B account.lookup / account.create spans nest under their execute_tool spans")
 check(lk.attributes["traceloop.span.kind"] == "tool" and cr.attributes["traceloop.span.kind"] == "tool",
       "B new tools are classified traceloop.span.kind=tool")
-check(EMAIL not in lk.attributes["gen_ai.tool.call.arguments"] and f"<email:{EMAIL_H}>" in lk.attributes["gen_ai.tool.call.arguments"],
-      "B tool-argument attributes redact the email to a stable hash")
+check(EMAIL not in lk.attributes["gen_ai.tool.call.arguments"] and "<email_redacted>" in lk.attributes["gen_ai.tool.call.arguments"],
+      "B tool-argument attributes redact the email")
 check(EMAIL not in agent.attributes["app.prompt.text"], "B prompt text attribute is email-redacted")
-check(cr.attributes["app.customer.type"] == "new" and cr.attributes["app.customer.email_hash"] == EMAIL_H
-      and cr.attributes["app.checkout.id"], "B create_account span carries customer type, email hash, checkout id")
+check(cr.attributes["app.customer.type"] == "new" and "app.customer.email_hash" not in cr.attributes
+      and cr.attributes["app.checkout.id"], "B create_account span carries customer type + checkout id and NO email hash")
 check(acr.attributes["app.account.created"] is True and alk.attributes["app.account.found"] is False,
       "B account spans record found/created")
 ask(SID, "Use the Visa ending 0454", "checkout_request")
@@ -296,12 +313,15 @@ check(by_name(spans, "invoke_agent")[0].attributes["traceloop.span.kind"] == "ag
 # ---- logs
 done = [r for r in records if r.getMessage() == "assistant.request.completed"]
 fields = done[-1].fields
-check(bool(done) and fields["app.session.id"] == SID2 and "prompt" not in {k.lower() for k in fields}, "logs completed event w/o prompt text duplication")
+check(bool(done) and fields["app.session.ref"] == tel.session_ref(SID2) and "app.session.id" not in fields
+                    and fields["UserId"] == tel.session_ref(SID2) and "prompt" not in {k.lower() for k in fields}, "logs completed event w/o prompt text duplication")
 check(any(r.getMessage() == "checkout.attempt" and r.fields["checkout.outcome"] == "failed" and r.fields["app.checkout.id"] for r in records),
       "logs structured checkout.attempt failed event with checkout id")
 for evt in ("account.lookup", "account.create", "checkout.stage", "checkout.terminal", "checkout.currency_selected"):
-    check(any(r.getMessage() == evt and r.fields.get("app.session.id") for r in records), f"logs {evt} event with session correlation")
+    check(any(r.getMessage() == evt and r.fields.get("app.session.ref") for r in records), f"logs {evt} event with session correlation")
 check(not any(EMAIL in json.dumps(r.fields, default=str) for r in records), "logs never contain the raw customer email")
+check(not any(SID in json.dumps(r.fields, default=str) or SID2 in json.dumps(r.fields, default=str) for r in records),
+      "logs never contain a raw session id")
 
 import agent  # noqa: E402
 
@@ -336,9 +356,8 @@ try:
     a = agent_span(spans)
     # baggage stamping exports this as the string "True" (pre-existing behaviour, kept unchanged)
     check(code == 200 and a.attributes.get("app.account.authenticated") in (True, "True")
-          and a.attributes.get("app.customer.email") == _out_email
-          and a.attributes.get("app.customer.name") == "Outage Shopper",
-          "F outage: authenticated identity preserved on invoke_agent span (from Redis session)")
+          and "app.customer.email" not in a.attributes and "app.customer.name" not in a.attributes,
+          "F outage: authenticated identity preserved on invoke_agent span (from Redis session), without email/name")
     check(a.attributes.get("app.account.profile_available") is False, "F outage: app.account.profile_available=false")
     code, body, spans = ask_auth(f"my email is {_out_email}")
     tools = [s for s in spans if s.name.startswith("execute_tool")]
@@ -359,7 +378,7 @@ for _ in range(6):
     if agent_span(spans).attributes.get("app.account.profile_available") is True:
         recovered = agent_span(spans)
         break
-check(recovered is not None and recovered.attributes.get("app.customer.email") == _out_email,
+check(recovered is not None and recovered.attributes.get("app.account.authenticated") in (True, "True"),
       "F recovery: profile available again with the same session, no re-login")
 prof = client.get("/account/profile", headers={**_internal, "X-Account-Session": _tok})
 check(prof.status_code == 200 and prof.get_json()["account"]["email"] == _out_email, "F recovery: /account/profile 200")

@@ -63,12 +63,16 @@ class CheckoutState:
         self.name = None
         self.address = None
         self.payment_method_id = None
+        self.saved_payment_labels = {}   # id -> label for the signed-in customer's saved methods
+        self.customer_id = None          # Postgres customer UUID (signed-in sessions only)
         self.currency = None
         self.currency_injected = False   # the stored currency came from synthetic fault injection
         self.reviewed_turn = None
         self.review_fingerprint = None
         self.confirmed = False
         self.done = False
+        self.idempotency_key = None      # reused across retries of the same reviewed order
+        self.idempotency_basis = None
         self.stage = "identify"
 
     @property
@@ -165,6 +169,54 @@ def _clean_address(args):
     return address
 
 
+def _grpc():
+    return config.ACCOUNT_BACKEND == "grpc"
+
+
+_GRPC_LABELS = {"first_name": "first name", "last_name": "last name", "email": "email address", "phone": "phone number",
+                "address_line1": "street address", "address_line2": "apartment or suite", "city": "city", "state": "state",
+                "zip": "ZIP code", "country": "country"}
+_GRPC_ORDER = list(_GRPC_LABELS)
+
+
+def _reg_fields(first_name="", last_name="", email="", phone="", street_address="", address_line2="", city="", state="",
+                zip_code="", country=""):
+    return {"first_name": first_name, "last_name": last_name, "email": email, "phone": phone,
+            "address_line1": street_address, "address_line2": address_line2, "city": city, "state": state,
+            "zip": zip_code, "country": country}
+
+
+def _register_pii(fields):
+    """Tell the telemetry sanitizer about this customer's exact values so any echo is scrubbed."""
+    telemetry_sanitize.register_sensitive(fields.get("first_name"), fields.get("last_name"), min_len=3)
+    telemetry_sanitize.register_sensitive(fields.get("email"), fields.get("phone"), fields.get("address_line1"),
+                                          fields.get("address_line2"), fields.get("city"), fields.get("zip"))
+
+
+def _legacy_address(n):
+    """Server-normalized address -> the assistant's internal address shape."""
+    street = n["line1"] + (f", {n['line2']}" if n.get("line2") else "")
+    return {"street_address": street, "city": n["city"], "state": n["state"], "zip_code": n["zip"], "country": n["country"] or "US"}
+
+
+def _need_fields(st, errors):
+    """Needs-info result from server field errors (codes + contract messages; never the submitted values)."""
+    ordered = [f for f in _GRPC_ORDER if f in errors]
+    labels = [_GRPC_LABELS[f] for f in ordered]
+    out = _need(st, "missing or invalid: " + ", ".join(labels))
+    out["missing_fields"] = labels
+    out["field_errors"] = {_GRPC_LABELS[f]: errors[f]["message"] for f in ordered}
+    out["hint"] = ("Tell the customer exactly which of these are still needed or need fixing: " + ", ".join(labels)
+                   + ". Use the messages in field_errors. Required: first name, last name, email, phone number, "
+                   "street address, city, state and ZIP code (US addresses only; apartment or suite is optional).")
+    return out
+
+
+def _grpc_unavailable(st, session, what):
+    return {"error": f"account service unavailable: {what}", "hint": "offer to continue as guest",
+            "checkout": st.snapshot()}
+
+
 def _cart_fingerprint(user_id):
     items, total = backends.cart_contents(user_id)
     return tuple(sorted((i["product_id"], i["quantity"]) for i in items)), items, total
@@ -188,14 +240,39 @@ def start_checkout(session):
     return _attach(st, {"status": "started", "cart_total_usd": total, "item_count": len(items)})
 
 
+def _lookup_account_grpc(session, email):
+    st = session.checkout
+    st.touch()
+    _begin(st)
+    ident = getattr(session, "customer_account", None)
+    if not ident or not ident.get("customer_id"):
+        hooks.event("account.lookup", st, found=False, outcome="not_signed_in")
+        # Never confirm whether an email has an account: only a signed-in session reveals saved details.
+        return _attach(st, {"found": False, "signed_in": False,
+                            "hint": "The customer is not signed in. Offer to log in on the storefront, create_account, or "
+                                    "continue_as_guest. Do not say whether an account exists for an email address."})
+    st.set_identity(ident["email"], ident.get("name"), "returning")
+    st.address = ident.get("address")
+    prefilled = {"identify"} | ({"shipping"} if st.address else set())
+    hooks.event("account.lookup", st, found=True, outcome="found", returning=True, prefilled_address=bool(st.address),
+                prefilled_payment=False)
+    st.advance(prefilled)
+    out = {"found": True, "signed_in": True, "name": st.name}
+    if st.address:
+        out["address_on_file"] = st.address
+    return _attach(st, out)
+
+
 def lookup_account(session, email):
+    if _grpc():
+        return _lookup_account_grpc(session, email)
     st = session.checkout
     st.touch()
     email = accounts.normalize_email(email)
     if not _EMAIL.match(email):
         return _need(st, "that does not look like a valid email address")
     _begin(st)
-    with hooks.span("account.lookup", **{"app.customer.email_hash": accounts.email_hash(email)}) as sp:
+    with hooks.span("account.lookup") as sp:
         try:
             acct = accounts.store.get(email)
         except Exception as e:  # noqa: BLE001
@@ -241,7 +318,61 @@ _FIELD_LABELS = {"first_name": "first name", "last_name": "last name", "email": 
                  "zip_code": "postal code", "country": "country"}
 
 
-def create_account(session, first_name, last_name, email, street_address, city, state, zip_code, country):
+def _create_account_grpc(session, fields):
+    st = session.checkout
+    st.touch()
+    _register_pii(fields)
+    client = accounts.grpc_client()
+    try:
+        errors, n = client.validate(fields)
+    except Exception as e:  # noqa: BLE001
+        hooks.event("account.create", st, outcome="error", error_type=type(e).__name__)
+        return _grpc_unavailable(st, session, type(e).__name__)
+    errors = {k: v for k, v in errors.items() if not k.startswith("password") and k != "confirm_password"}
+    if errors:
+        return _need_fields(st, errors)
+    telemetry_sanitize.register_sensitive(n["phone"], n["email"])
+    _begin(st)
+    with hooks.span("account.create") as sp:
+        try:
+            res = client.begin_signup(getattr(session, "id", ""), fields)
+        except Exception as e:  # noqa: BLE001
+            if sp is not None:
+                sp.record_exception(e)
+            hooks.event("account.create", st, outcome="error", error_type=type(e).__name__)
+            if type(e).__name__ == "ValidationFailed":
+                return _need_fields(st, e.fields)
+            return _grpc_unavailable(st, session, type(e).__name__)
+        outcome = res["outcome"]
+        if sp is not None:
+            sp.set_attribute("app.account.activation.outcome", outcome)
+    if outcome == "exists":
+        hooks.event("account.create", st, outcome="exists")
+        return _attach(st, {"status": "account_exists", "hint": "An account with that email may already exist. Ask the customer "
+                                                                "to log in on the storefront, or continue as a guest."})
+    if outcome == "pending_elsewhere":
+        hooks.event("account.create", st, outcome="pending_elsewhere")
+        return _attach(st, {"status": "account_pending_elsewhere",
+                            "hint": "An account setup for this email is already in progress. Offer to continue as a guest or "
+                                    "to try again later."})
+    st.set_identity(n["email"], f"{n['first_name']} {n['last_name']}".strip(), "new")
+    st.address = _legacy_address(n)
+    session.pending_activation = bool(res["handoff"])
+    hooks.event("account.create", st, outcome="created", activation_outcome=outcome, activation_pending=bool(res["handoff"]),
+                **{"app.account.handoff.outcome": "ok" if res["handoff"] else "failed"})
+    st.advance()
+    hint = ("The storefront will show Complete Account Setup. Never ask for a password in chat."
+            if res["handoff"] else
+            "The account was created but the setup link is temporarily unavailable. Continue checkout; "
+            "never ask for a password in chat.")
+    return _attach(st, {"status": "account_created", "name": st.name, "complete_setup": bool(res["handoff"]), "hint": hint})
+
+
+def create_account(session, first_name, last_name, email, street_address, city, state, zip_code, country="US",
+                   phone="", address_line2=""):
+    if _grpc():
+        return _create_account_grpc(session, _reg_fields(first_name, last_name, email, phone, street_address,
+                                                         address_line2, city, state, zip_code, country))
     st = session.checkout
     st.touch()
     email = accounts.normalize_email(email)
@@ -259,7 +390,7 @@ def create_account(session, first_name, last_name, email, street_address, city, 
                        "postal code and country are required.")
         return out
     _begin(st)
-    with hooks.span("account.create", **{"app.customer.email_hash": accounts.email_hash(email)}) as sp:
+    with hooks.span("account.create") as sp:
         try:
             res = accounts.store.create_pending(getattr(session, "id", ""), name, email, address)
         except Exception as e:  # noqa: BLE001
@@ -297,9 +428,19 @@ def create_account(session, first_name, last_name, email, street_address, city, 
 def continue_as_guest(session, email, name=""):
     st = session.checkout
     st.touch()
-    email = accounts.normalize_email(email)
-    if not _EMAIL.match(email):
-        return _need(st, "that does not look like a valid email address")
+    if _grpc():
+        email = str(email or "").strip()
+        try:
+            errors, n = accounts.grpc_client().validate({"email": email}, only={"email"})
+        except Exception as e:  # noqa: BLE001
+            return _grpc_unavailable(st, session, type(e).__name__)
+        if errors:
+            return _need(st, errors["email"]["message"])
+        email = n["email"]
+    else:
+        email = accounts.normalize_email(email)
+        if not _EMAIL.match(email):
+            return _need(st, "that does not look like a valid email address")
     _begin(st)
     st.set_identity(email, str(name or "").strip() or None, "guest")
     hooks.event("checkout.guest", st)
@@ -307,9 +448,24 @@ def continue_as_guest(session, email, name=""):
     return _attach(st, {"status": "guest"})
 
 
-def set_shipping_address(session, street_address, city, state, zip_code, country):
+def set_shipping_address(session, street_address, city, state, zip_code, country="US", address_line2=""):
     st = session.checkout
     st.touch()
+    if _grpc():
+        fields = _reg_fields(street_address=street_address, address_line2=address_line2, city=city, state=state,
+                             zip_code=zip_code, country=country)
+        _register_pii(fields)
+        try:
+            errors, n = accounts.grpc_client().validate(fields, only={"address_line1", "address_line2", "city", "state", "zip", "country"})
+        except Exception as e:  # noqa: BLE001
+            return _grpc_unavailable(st, session, type(e).__name__)
+        if errors:
+            return _need_fields(st, errors)
+        _begin(st)
+        st.address = _legacy_address(n)
+        hooks.event("checkout.shipping_set", st, country=st.address["country"])
+        st.advance()
+        return _attach(st, {"status": "address_saved"})
     address = _clean_address(dict(street_address=street_address, city=city, state=state,
                                   zip_code=zip_code, country=country))
     if not _valid_address(address):
@@ -323,26 +479,48 @@ def set_shipping_address(session, street_address, city, state, zip_code, country
 
 def list_payment_methods(session):
     session.checkout.touch()
+    saved = _saved_methods(session)
+    if saved:
+        return {"payment_methods": [{"id": k, "label": v, "saved": True} for k, v in saved.items()],
+                "note": "the customer's saved synthetic test cards; never ask for real card numbers"}
     return {"payment_methods": accounts.list_payment_methods(),
             "note": "synthetic test cards; never ask for real card numbers"}
+
+
+def _saved_methods(session):
+    """{id: label} of the signed-in customer's saved demo cards ({} for guests or when unavailable)."""
+    tok = getattr(session, "account_token", "") or ""
+    if not tok or config.ACCOUNT_BACKEND != "grpc":
+        return {}
+    try:
+        methods = accounts.grpc_client().payment_methods(tok)
+    except Exception:  # noqa: BLE001 - fall back to the demo catalog; never block checkout on this
+        return {}
+    return {m["id"]: f"{m['brand'].capitalize()} ending {m['last4']}" for m in methods}
+
+
+def _pm_label(st):
+    return st.saved_payment_labels.get(st.payment_method_id) or accounts.PAYMENT_METHODS[st.payment_method_id]["label"]
 
 
 def set_payment(session, payment_method_id):
     st = session.checkout
     st.touch()
-    if payment_method_id not in accounts.PAYMENT_METHODS:
+    saved = _saved_methods(session)
+    if payment_method_id not in saved and payment_method_id not in accounts.PAYMENT_METHODS:
         return _need(st, "unknown payment_method_id; call list_payment_methods")
     _begin(st)
+    st.saved_payment_labels = saved
     st.payment_method_id = payment_method_id
     hooks.event("checkout.payment_selected", st, payment_method_id=payment_method_id)
     st.advance()
-    if st.customer_type in ("new", "returning") and st.email:
+    if payment_method_id not in saved and config.ACCOUNT_BACKEND != "grpc" and st.customer_type in ("new", "returning") and st.email:
         try:
             accounts.store.update(st.email, default_payment_method_id=payment_method_id)
         except Exception:  # noqa: BLE001 - saving the default is best effort
             pass
     return _attach(st, {"status": "payment_selected",
-                        "payment_method": accounts.PAYMENT_METHODS[payment_method_id]["label"]})
+                        "payment_method": _pm_label(st)})
 
 
 def set_currency(session, currency_code):
@@ -378,7 +556,7 @@ def review_order(session):
     st.advance()
     return _attach(st, {"status": "review", "summary": {
         "items": items, "total_usd": total, "email": st.email,
-        "ship_to": st.address, "payment_method": accounts.PAYMENT_METHODS[st.payment_method_id]["label"],
+        "ship_to": st.address, "payment_method": _pm_label(st),
         "currency": st.currency},
         "instruction": "Read this to the customer and ask them to confirm. Do not confirm for them."})
 
@@ -414,16 +592,39 @@ def place_order(session):
         return _need(st, "the cart changed after the summary; call review_order again")
     st.attempt += 1
     st.attempt_open = True
+    key = _idempotency_key(st, fp)
+    saved = st.payment_method_id in st.saved_payment_labels
     result = backends.place_order(session.id, st.currency, st.email, st.address,
-                                  accounts.card_number(st.payment_method_id))
+                                  None if saved else accounts.card_number(st.payment_method_id), idempotency_key=key,
+                                  account_token=getattr(session, "account_token", "") or "",
+                                  payment_method_id=st.payment_method_id if saved else "")
     if "error" in result:
-        hooks.terminal(st, "failed", result.get("grpc_status", "tool_error"))
+        reason = result.get("reason", "")
+        hooks.terminal(st, "failed", reason or result.get("grpc_status", "tool_error"))
         st.attempt_open = False
+        if reason in ("payment_method_unavailable", "login_required"):
+            st.payment_method_id, st.saved_payment_labels = None, {}
+            result["hint"] = "That saved payment method can't be used. Call list_payment_methods and ask the customer to choose again."
+        if reason in ("payment_uncertain", "checkout_in_progress", "order_queue_unavailable"):
+            # Same key on the next try: checkout resolves the earlier attempt instead of charging again.
+            result["retry_safe"] = True
         return _attach(st, result)
     st.done = True
     hooks.terminal(st, "completed")
     st.attempt_open = False
     return _attach(st, result)
+
+
+def _idempotency_key(st, cart_fp):
+    """One key per reviewed order. A changed cart, address, card or currency is a different order and
+    gets a new key (reusing the old one would be an idempotency conflict at checkout)."""
+    import hashlib
+    basis = hashlib.sha256(repr((cart_fp, st.currency, st.payment_method_id, sorted((st.address or {}).items()),
+                                 st.email)).encode()).hexdigest()
+    if st.idempotency_key is None or st.idempotency_basis != basis:
+        st.idempotency_key = f"asst:{st.flow_id}:{uuid.uuid4().hex[:16]}"
+        st.idempotency_basis = basis
+    return st.idempotency_key
 
 
 TOOLS = {f.__name__: f for f in (

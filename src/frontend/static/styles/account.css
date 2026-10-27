@@ -1,0 +1,25 @@
+.acct { max-width: 960px; }
+.acct h1 { margin-bottom: 1rem; }
+.acct-nav { display: flex; gap: 1.25rem; flex-wrap: wrap; border-bottom: 1px solid #ddd; margin-bottom: 1.5rem; padding-bottom: .5rem; }
+.acct-nav a { color: #444; text-decoration: none; padding-bottom: .25rem; }
+.acct-nav a.active { color: #000; font-weight: 700; border-bottom: 2px solid #000; }
+.acct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.acct-card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; background: #fff; }
+.acct-card h2 { font-size: 1.1rem; margin-bottom: .5rem; }
+.acct-form { max-width: 520px; }
+.acct-form fieldset { border: 0; padding: 0; margin: 0 0 1.25rem; }
+.acct-form legend { font-size: 1.05rem; font-weight: 700; margin-bottom: .5rem; }
+.acct-field { margin-bottom: .85rem; display: flex; flex-direction: column; }
+.acct-field input, .acct-field select { padding: .5rem .6rem; border: 1px solid #999; border-radius: 4px; }
+.acct-field.has-error input, .acct-field.has-error select { border-color: #b00020; }
+.acct-field-error, .account-error { color: #b00020; }
+.acct-hint { color: #666; }
+.acct-banner { background: #fff7e0; border: 1px solid #f0d58a; padding: .6rem .9rem; border-radius: 6px; }
+.acct-notice { background: #e8f5e9; border: 1px solid #b7dfb9; padding: .6rem .9rem; border-radius: 6px; }
+.acct-unavailable { color: #8a5a00; }
+.acct-badge { font-size: .7rem; background: #eee; border-radius: 10px; padding: .1rem .5rem; vertical-align: middle; }
+.acct-inline { display: inline; margin-left: .75rem; }
+.acct-link { background: none; border: 0; color: #0b5ed7; padding: 0; cursor: pointer; }
+.acct-table { width: 100%; border-collapse: collapse; }
+.acct-table th, .acct-table td { text-align: left; padding: .5rem; border-bottom: 1px solid #eee; }
+.acct-alt { margin-top: 1rem; }

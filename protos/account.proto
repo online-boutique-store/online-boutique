@@ -1,0 +1,296 @@
+// AccountService: customer accounts, profile, saved addresses, payment-method references and order
+// history. Owned by accountservice; the only reader/writer of the accounts Postgres.
+//
+// Conventions
+//  * User calls carry gRPC metadata `x-account-session` (opaque token); the server derives the customer
+//    from it. Customer ids are never accepted from callers on user calls.
+//  * Service calls carry `x-service-name` + `x-service-secret`.
+//  * Validation failures: INVALID_ARGUMENT with google.rpc.BadRequest field violations (field =
+//    field name, description = stable error code). Messages come from account_validation.json.
+//  * Outages: UNAVAILABLE with ErrorInfo.reason in {unreachable, timeout, schema_not_ready,
+//    schema_mismatch, order_queue_unavailable}.
+syntax = "proto3";
+
+package hipstershop;
+
+import "demo.proto";
+
+
+service AccountService {
+  // identity
+  rpc ValidateRegistration(RegistrationInput) returns (ValidationResult) {}
+  rpc Register(RegisterRequest) returns (SessionResponse) {}
+  rpc BeginAssistantSignup(AssistantSignupRequest) returns (SignupHandoff) {}
+  rpc GetActivation(GetActivationRequest) returns (ActivationInfo) {}
+  rpc Claim(ClaimRequest) returns (SessionResponse) {}
+  rpc Login(LoginRequest) returns (SessionResponse) {}
+  rpc Logout(Empty) returns (Empty) {}
+  rpc ResolveSession(Empty) returns (SessionContext) {}
+
+  // profile
+  rpc GetProfile(Empty) returns (Profile) {}
+  rpc UpdateProfile(UpdateProfileRequest) returns (Profile) {}
+
+  // saved addresses
+  rpc ListAddresses(Empty) returns (AddressList) {}
+  rpc CreateAddress(AddressInput) returns (SavedAddress) {}
+  rpc UpdateAddress(UpdateAddressRequest) returns (SavedAddress) {}
+  rpc DeleteAddress(AddressRef) returns (Empty) {}
+  rpc SetDefaultAddress(AddressRef) returns (SavedAddress) {}
+
+  // payment methods (synthetic demo catalog only)
+  rpc ListCatalogCards(Empty) returns (CatalogCardList) {}
+  rpc ListPaymentMethods(Empty) returns (PaymentMethodList) {}
+  rpc AddPaymentMethod(AddPaymentMethodRequest) returns (PaymentMethod) {}
+  rpc DeletePaymentMethod(PaymentMethodRef) returns (Empty) {}
+  rpc SetDefaultPaymentMethod(PaymentMethodRef) returns (PaymentMethod) {}
+  rpc ResolvePaymentMethodToken(PaymentMethodRef) returns (PaymentToken) {}   // service-only
+
+  // orders (written only through the Redis Stream consumer)
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse) {}
+  rpc GetOrder(OrderRef) returns (AccountOrder) {}
+  rpc ClaimGuestOrders(ClaimGuestRequest) returns (ClaimResult) {}
+  rpc GetOrderQueueStatus(Empty) returns (QueueStatus) {}
+}
+
+message AccountAddress {
+  string line1 = 1;
+  string line2 = 2;
+  string city = 3;
+  string state = 4;
+  string zip = 5;
+  string country = 6;
+}
+
+message RegistrationInput {
+  string first_name = 1;
+  string last_name = 2;
+  string email = 3;
+  string phone = 4;
+  AccountAddress address = 5;
+  string password = 6;
+  string confirm_password = 7;
+  string preferred_currency = 8;
+}
+
+message FieldError {
+  string code = 1;
+  string message = 2;
+}
+
+message ValidationResult {
+  map<string, FieldError> fields = 1;
+  RegistrationInput normalized = 2;   // best-effort normalized values (E.164 phone, upper-case state, ZIP+4, display email)
+}
+
+message RegisterRequest {
+  RegistrationInput input = 1;
+}
+
+message AssistantSignupRequest {
+  RegistrationInput input = 1;       // password empty: it is set at activation
+  string session_id = 2;             // browser session id; hashed server-side, never logged or traced
+}
+
+message SignupHandoff {
+  string outcome = 1;                // created | resumed | recreated_abandoned | pending_elsewhere | exists
+  string customer_id = 2;
+  bool handoff = 3;
+}
+
+message GetActivationRequest {
+  string session_id = 1;
+}
+
+message ActivationInfo {
+  bool pending = 1;
+  string email_display = 2;
+}
+
+message ClaimRequest {
+  string session_id = 1;
+  string password = 2;
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message SessionResponse {
+  string session_token = 1;          // opaque; the frontend stores it in an HttpOnly cookie
+  SessionContext context = 2;
+}
+
+message SessionContext {
+  bool authenticated = 1;
+  string customer_id = 2;
+  string first_name = 3;
+  bool profile_complete = 4;
+  int32 profile_version = 5;
+  repeated string missing_fields = 6;
+  string preferred_currency = 7;
+}
+
+message Profile {
+  string customer_id = 1;
+  string first_name = 2;
+  string last_name = 3;
+  string email_display = 4;
+  string phone_display = 5;
+  string phone_e164 = 6;             // returned to the owner only (edit forms)
+  string preferred_currency = 7;
+  int32 profile_version = 8;
+  bool profile_complete = 9;
+  repeated string missing_fields = 10;
+  string created_via = 11;
+  int64 created_at = 12;
+}
+
+message UpdateProfileRequest {
+  string first_name = 1;
+  string last_name = 2;
+  string phone = 3;
+  string preferred_currency = 4;
+  repeated string fields = 5;        // which of the above are being changed
+}
+
+message SavedAddress {
+  string id = 1;
+  string label = 2;
+  string line1 = 3;
+  string line2 = 4;
+  string city = 5;
+  string state = 6;
+  string zip = 7;
+  string country = 8;
+  bool is_po_box = 9;
+  bool is_default = 10;
+  string address_verification_status = 11;
+}
+
+message AddressList {
+  repeated SavedAddress addresses = 1;
+}
+
+message AddressInput {
+  string label = 1;
+  AccountAddress address = 2;
+  bool make_default = 3;
+}
+
+message UpdateAddressRequest {
+  string id = 1;
+  string label = 2;
+  AccountAddress address = 3;
+}
+
+message AddressRef {
+  string id = 1;
+}
+
+message CatalogCard {
+  string catalog_id = 1;
+  string brand = 2;
+  string last4 = 3;
+  int32 exp_month = 4;
+  int32 exp_year = 5;
+  string display_name = 6;
+}
+
+message CatalogCardList {
+  repeated CatalogCard cards = 1;
+}
+
+message PaymentMethod {
+  string id = 1;
+  string brand = 2;
+  string last4 = 3;
+  int32 exp_month = 4;
+  int32 exp_year = 5;
+  string label = 6;
+  bool is_default = 7;
+}
+
+message PaymentMethodList {
+  repeated PaymentMethod methods = 1;
+}
+
+message AddPaymentMethodRequest {
+  string catalog_id = 1;
+  string label = 2;
+  bool make_default = 3;
+}
+
+message PaymentMethodRef {
+  string id = 1;
+  string customer_id = 2;            // service-only ResolvePaymentMethodToken; ignored on user calls
+}
+
+message PaymentToken {
+  string token = 1;
+  string brand = 2;
+  string last4 = 3;
+}
+
+message ListOrdersRequest {
+  int32 page_size = 1;
+  string cursor = 2;
+}
+
+message AccountOrderItem {
+  string product_id = 1;
+  string name = 2;
+  int32 quantity = 3;
+  Money unit_price = 4;
+}
+
+message AccountOrder {
+  string order_id = 1;
+  int64 placed_at = 2;
+  string status = 3;
+  string currency = 4;
+  Money subtotal = 5;
+  Money shipping = 6;
+  Money total = 7;
+  repeated AccountOrderItem items = 8;
+  string tracking_id = 9;
+  SavedAddress ship_to = 10;
+  string payment_brand = 11;
+  string payment_last4 = 12;
+  string channel = 13;
+  int32 item_count = 14;
+}
+
+message OrderSummary {
+  string order_id = 1;
+  int64 placed_at = 2;
+  string status = 3;
+  Money total = 4;
+  int32 item_count = 5;
+  repeated string item_names = 6;
+}
+
+message ListOrdersResponse {
+  repeated OrderSummary orders = 1;
+  string next_cursor = 2;
+  int64 queue_depth = 3;             // >0 => "recent orders may take a moment to appear"
+}
+
+message OrderRef {
+  string order_id = 1;
+}
+
+message ClaimGuestRequest {
+  string session_id = 1;             // the browser session that placed the guest orders (hashed to a reference server-side)
+}
+
+message ClaimResult {
+  int32 claimed = 1;
+}
+
+message QueueStatus {
+  int64 depth = 1;
+  int64 oldest_age_seconds = 2;
+  int64 dead = 3;
+}

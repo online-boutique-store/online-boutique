@@ -1,0 +1,141 @@
+# Dedicated Redis for durable checkout: checkout state (co:*), payment/shipping idempotency records
+# (charge:*, ship:*) and the orders:v1 stream consumed by accountservice.
+# WRITTEN BUT NOT APPLIED. Not part of deploy/observe-skaffold; apply separately with approval:
+#   kubectl apply -n online-boutique -f deploy/accountservice/order-queue.yaml
+#
+# This is NOT redis-cart. Losing it can lose in-flight checkout state, so:
+#   - AOF with appendfsync always: an acknowledged checkout step survives a pod kill (fsync per write).
+#   - maxmemory-policy noeviction: Redis returns errors instead of silently evicting checkout state;
+#     checkout then fails closed with order_queue_unavailable.
+#   - Persistent volume. Single replica, not HA: a reschedule is a brief outage during which new
+#     checkouts fail closed and already-charged ones are completed by the checkout janitor afterwards.
+#
+# Before the first apply:
+#   - Pin the image by digest (linux/amd64; cannot be resolved offline).
+#   - Confirm the gp2 StorageClass (same as redis-cart) and its reclaim policy.
+#   - Set ORDER_QUEUE_ADDR=order-queue:6379 on checkoutservice, paymentservice, shippingservice and
+#     accountservice in the same rollout (see docs/account-experience-runbook.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-queue-config
+  labels:
+    app: order-queue
+data:
+  redis.conf: |
+    appendonly yes
+    appendfsync always
+    aof-use-rdb-preamble yes
+    save ""
+    maxmemory 200mb
+    maxmemory-policy noeviction
+    dir /data
+    protected-mode no
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-queue
+  labels:
+    app: order-queue
+spec:
+  selector:
+    app: order-queue
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: order-queue
+  labels:
+    app: order-queue
+spec:
+  serviceName: order-queue
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-queue
+  template:
+    metadata:
+      labels:
+        app: order-queue
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: redis
+        image: redis:7.2-alpine  # pin by digest before apply
+        args: ["redis-server", "/etc/redis/redis.conf"]
+        ports:
+        - name: redis
+          containerPort: 6379
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          periodSeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: redis
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 70m
+            memory: 200Mi
+          limits:
+            memory: 256Mi
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: config
+          mountPath: /etc/redis
+      volumes:
+      - name: config
+        configMap:
+          name: order-queue-config
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: gp2
+      resources:
+        requests:
+          storage: 1Gi
+---
+# Effective only if the cluster CNI enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-queue
+spec:
+  podSelector:
+    matchLabels:
+      app: order-queue
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    - podSelector:
+        matchLabels:
+          app: paymentservice
+    - podSelector:
+        matchLabels:
+          app: shippingservice
+    - podSelector:
+        matchLabels:
+          app: accountservice
+    ports:
+    - port: 6379

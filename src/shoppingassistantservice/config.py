@@ -55,6 +55,9 @@ ACCOUNTS_DB_POOL_MAX = _int("ACCOUNTS_DB_POOL_MAX", 5)
 ACCOUNTS_DB_STATEMENT_TIMEOUT_MS = _int("ACCOUNTS_DB_STATEMENT_TIMEOUT_MS", 3000)
 ACCOUNTS_MIGRATION_RETRY_MAX_S = _int("ACCOUNTS_MIGRATION_RETRY_MAX_S", 30)
 
+# local = accounts live in this process (Redis + Postgres); grpc = accountservice owns them.
+ACCOUNT_BACKEND = os.environ.get("ACCOUNT_BACKEND", "local").strip().lower()
+
 PORT = _int("PORT", 8080)
 
 

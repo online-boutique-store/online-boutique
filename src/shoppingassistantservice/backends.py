@@ -53,7 +53,11 @@ def _product(p):
 
 def _err(e):
     code = e.code().name if hasattr(e, "code") and e.code() else "UNKNOWN"
-    return {"error": f"{code}: {e.details()}", "grpc_status": code}
+    details = e.details() or ""
+    out = {"error": f"{code}: {details}", "grpc_status": code}
+    if details.startswith("reason:"):  # checkoutservice's stable reason code
+        out["reason"] = details[len("reason:"):]
+    return out
 
 
 _price_cache = {}
@@ -154,24 +158,34 @@ def _zip_int(z):
     return int(digits[:9] or 0)
 
 
-def place_order(user_id, currency_code, email, address, card_number):
+def place_order(user_id, currency_code, email, address, card_number, idempotency_key="", account_token="", payment_method_id=""):
     """Charge the cart. `card_number` is a synthetic TEST card resolved from a payment
-    method id; it is only handed to checkoutservice and is never logged or traced."""
+    method id; it is only handed to checkoutservice and is never logged or traced.
+    `idempotency_key` makes a retried call safe (checkout replays instead of charging twice);
+    `account_token` lets checkout attribute the order to the signed-in customer."""
     year = datetime.date.today().year + 2
+    md = [("x-account-session", account_token)] if account_token else None
     try:
         resp = _checkout().PlaceOrder(pb.PlaceOrderRequest(
             user_id=user_id,
             user_currency=currency_code,
             address=pb.Address(street_address=address["street_address"], city=address["city"],
                                state=address["state"], country=address["country"],
-                               zip_code=_zip_int(address["zip_code"])),
+                               zip_code=_zip_int(address["zip_code"]),
+                               postal_code=str(address.get("zip_code") or "")),
             email=email,
-            credit_card=pb.CreditCardInfo(
+            # A saved method is charged by token inside checkout: no card data is sent at all.
+            credit_card=None if payment_method_id else pb.CreditCardInfo(
                 credit_card_number=card_number, credit_card_cvv=672,
-                credit_card_expiration_year=year, credit_card_expiration_month=1)),
-            timeout=config.GRPC_TIMEOUT_S)
+                credit_card_expiration_year=year, credit_card_expiration_month=1),
+            payment_method_id=payment_method_id or "",
+            idempotency_key=idempotency_key, channel="assistant"),
+            timeout=config.GRPC_TIMEOUT_S, metadata=md)
         o = resp.order
         return {
+            "status": resp.status or "completed",
+            "record_status": resp.record_status or "recorded",
+            "replayed": resp.replayed,
             "order_id": o.order_id,
             "shipping_tracking_id": o.shipping_tracking_id,
             "shipping_cost": _fmt_money(o.shipping_cost),

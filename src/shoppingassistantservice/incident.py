@@ -42,8 +42,8 @@ _COMMON = (
     "Product IDs are opaque; when you recommend or mention a specific product, "
     "write its ID in square brackets right after its name, like Mug [6E92ZMYYFZ]. "
     "Use short plain sentences. "
-    "Creating an account requires ALL of: first name, last name, email address, street address, city, "
-    "state or region, postal code and country. Whenever a customer asks to create an account, name every "
+    "Creating an account requires ALL of: first name, last name, email address, phone number, street address, "
+    "city, state and ZIP code (US addresses and phone numbers only; an apartment or suite line is optional). Whenever a customer asks to create an account, name every "
     "one of these required fields explicitly in your reply as a plain comma-separated sentence - never "
     "end a message with a colon or promise a list you do not write out. If create_account returns "
     "needs_info, repeat its missing_fields to the customer by name. "
@@ -83,8 +83,11 @@ _CURRENCY_PARAM = {
 
 
 _ADDR_PROPS = {k: {"type": "string"} for k in
-               ("street_address", "city", "state", "zip_code", "country")}
-_ADDR_REQ = list(_ADDR_PROPS)
+               ("street_address", "address_line2", "city", "state", "zip_code", "country")}
+_ADDR_PROPS["state"] = {"type": "string", "description": "Two-letter US state abbreviation, for example CA."}
+_ADDR_PROPS["address_line2"] = {"type": "string", "description": "Optional apartment or suite."}
+_ADDR_PROPS["country"] = {"type": "string", "description": "Defaults to US; only US addresses are supported."}
+_ADDR_REQ = ["street_address", "city", "state", "zip_code"]
 
 
 def prompt_version():
@@ -118,17 +121,22 @@ def tool_definitions():
            {"product_id": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1}},
            ["product_id", "quantity"]),
         fn("get_cart", "Show what is currently in the customer's cart.", {}, []),
+        fn("list_orders", "List the signed-in customer's most recent orders (id, date, status, total, items).",
+           {"limit": {"type": "integer", "minimum": 1, "maximum": 10}}, []),
+        fn("get_order", "Show one of the signed-in customer's orders by the order_id from list_orders.",
+           {"order_id": {"type": "string"}}, ["order_id"]),
         fn("start_checkout",
            "Begin checkout for the current cart. Call this when the customer asks to check out.",
            {}, []),
         fn("lookup_account", "Find an existing customer account by email.",
            {"email": {"type": "string"}}, ["email"]),
         fn("create_account",
-           "Create a customer account (saves first name, last name, email and shipping address). "
+           "Create a customer account (saves first name, last name, email, phone and shipping address). "
            "Every field is required; ask the customer for any that are missing instead of guessing.",
            {"first_name": {"type": "string"}, "last_name": {"type": "string"}, "email": {"type": "string"},
+            "phone": {"type": "string", "description": "US phone number, for example (415) 555-2671."},
             **_ADDR_PROPS},
-           ["first_name", "last_name", "email", *_ADDR_REQ]),
+           ["first_name", "last_name", "email", "phone", *_ADDR_REQ]),
         fn("continue_as_guest", "Check out without an account.",
            {"email": {"type": "string"}, "name": {"type": "string"}}, ["email"]),
         fn("set_shipping_address", "Set the shipping address for this order.",

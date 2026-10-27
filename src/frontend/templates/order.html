@@ -35,6 +35,9 @@
                 </div>
                 <div class="col-12 text-center">
                     <p>We've sent you a confirmation email.</p>
+                    {{ if eq $.record_status "history_unrecorded" }}
+                    <p class="acct-banner" role="status">Your order is confirmed. It may take a little while to appear in your order history.</p>
+                    {{ end }}
                 </div>
             </div>
             <div class="row border-bottom-solid padding-y-24">

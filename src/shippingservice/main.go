@@ -38,8 +38,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -85,12 +85,12 @@ func main() {
 
 	otel.SetTextMapPropagator(
 		propagation.NewCompositeTextMapPropagator(
-			propagation.TraceContext{}, propagation.Baggage{}))
+			propagation.TraceContext{}, allowlistBaggage{}))
 	srv := grpc.NewServer(
 		grpc.UnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
 		grpc.StreamInterceptor(otelgrpc.StreamServerInterceptor()),
 	)
-	svc := &server{}
+	svc := &server{store: newShipmentStore()}
 	pb.RegisterShippingServiceServer(srv, svc)
 	healthpb.RegisterHealthServer(srv, svc)
 	log.Infof("Shipping Service listening on port %s", port)
@@ -103,7 +103,7 @@ func main() {
 }
 
 // server controls RPC service responses.
-type server struct{}
+type server struct{ store *shipmentStore }
 
 // Check is for health checking.
 func (s *server) Check(ctx context.Context, req *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
@@ -134,24 +134,50 @@ func (s *server) GetQuote(ctx context.Context, in *pb.GetQuoteRequest) (*pb.GetQ
 }
 
 // ShipOrder mocks that the requested items will be shipped.
-// It supplies a tracking ID for notional lookup of shipment delivery status.
+// It supplies a tracking ID for notional lookup of shipment delivery status. With an idempotency
+// key the shipment is recorded durably first: a replay (client retry, crash and restart) returns
+// the ORIGINAL tracking id and never creates a second shipment. If the record cannot be written
+// the call fails (UNAVAILABLE) instead of shipping without a durable record.
 func (s *server) ShipOrder(ctx context.Context, in *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
 	stampAppAttrs(ctx)
 	log.WithContext(ctx).Info("[ShipOrder] received request")
 	defer log.WithContext(ctx).Info("[ShipOrder] completed request")
-	// 1. Create a Tracking ID
-	baseAddress := fmt.Sprintf("%s, %s, %s", in.Address.StreetAddress, in.Address.City, in.Address.State)
-	id := CreateTrackingId(baseAddress)
-
-	// 2. Stamp the tracking id onto this span as an originating attribute.
-	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-		span.SetAttributes(attribute.String("app.shipping.tracking_id", id))
+	span := trace.SpanFromContext(ctx)
+	key := in.GetIdempotencyKey()
+	var id string
+	replayed := false
+	if key != "" {
+		if s.store == nil {
+			return nil, status.Error(codes.FailedPrecondition, "idempotent shipping requires ORDER_QUEUE_ADDR")
+		}
+		var err error
+		id, replayed, err = s.store.record(ctx, key, deterministicTrackingID(key))
+		if err != nil {
+			return nil, status.Error(codes.Unavailable, "shipment_record_unavailable")
+		}
+		if testFault() == "exit_after_record" && !replayed {
+			os.Exit(1) // test-only: the shipment is durably recorded but the caller never hears back
+		}
+	} else {
+		baseAddress := fmt.Sprintf("%s, %s, %s", in.Address.StreetAddress, in.Address.City, in.Address.State)
+		id = CreateTrackingId(baseAddress)
 	}
+	if span.SpanContext().IsValid() {
+		span.SetAttributes(attribute.String("app.shipping.tracking_id", id), attribute.Bool("app.shipping.replayed", replayed))
+	}
+	return &pb.ShipOrderResponse{TrackingId: id, Replayed: replayed}, nil
+}
 
-	// 3. Generate a response.
-	return &pb.ShipOrderResponse{
-		TrackingId: id,
-	}, nil
+// GetShipment reports whether a shipment exists for an idempotency key (used to resolve an uncertain ShipOrder).
+func (s *server) GetShipment(ctx context.Context, in *pb.GetShipmentRequest) (*pb.GetShipmentResponse, error) {
+	if s.store == nil || in.GetIdempotencyKey() == "" {
+		return nil, status.Error(codes.FailedPrecondition, "idempotent shipping not configured")
+	}
+	id, found, err := s.store.get(ctx, in.GetIdempotencyKey())
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, "shipment_record_unavailable")
+	}
+	return &pb.GetShipmentResponse{Found: found, TrackingId: id}, nil
 }
 
 func initStats() {
@@ -161,7 +187,6 @@ func initStats() {
 func initTracing() {
 	var (
 		collectorAddr string
-		collectorConn *grpc.ClientConn
 	)
 
 	ctx := context.Background()
@@ -169,7 +194,11 @@ func initTracing() {
 	defer cancel()
 
 	mustMapEnv(&collectorAddr, "COLLECTOR_SERVICE_ADDR")
-	mustConnGRPC(ctx, &collectorConn, collectorAddr)
+	// The exporter's own connection must not be instrumented, or every export creates more spans.
+	collectorConn, err := grpc.DialContext(ctx, collectorAddr, grpc.WithInsecure())
+	if err != nil {
+		panic(errors.Wrapf(err, "grpc: failed to connect %s", collectorAddr))
+	}
 
 	exporter, err := otlptracegrpc.New(
 		ctx,
@@ -186,7 +215,7 @@ func initTracing() {
 		log.Warnf("warn: Failed to create trace resource: %v", err)
 	}
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithBatcher(sanitizingExporter{inner: exporter}),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	otel.SetTracerProvider(tp)

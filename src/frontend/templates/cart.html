@@ -159,6 +159,22 @@
                             </div>
                         </div>
 
+                        {{ if $.saved_methods }}
+                        <fieldset class="saved-methods" id="saved-methods">
+                            <legend class="visually-hidden">Saved payment methods</legend>
+                            {{ range $i, $m := $.saved_methods }}
+                            <label class="saved-method">
+                                <input type="radio" name="payment_method_id" value="{{ $m.Id }}" {{ if $m.IsDefault }}checked{{ end }}>
+                                {{ $m.Brand }} ending {{ $m.Last4 }} <span class="demo-tag">Demo test card</span>
+                            </label>
+                            {{ end }}
+                            <label class="saved-method">
+                                <input type="radio" name="payment_method_id" value="">
+                                Use a different card
+                            </label>
+                        </fieldset>
+                        {{ end }}
+                        <div class="card-fields" id="card-fields">
                         <div class="form-row">
                             <div class="col cymbal-form-field">
                                 <label for="credit_card_number">Credit Card Number</label>
@@ -205,6 +221,7 @@
                                 <input type="password" id="credit_card_cvv"
                                     name="credit_card_cvv" value="672" required pattern="\d{3}">
                             </div>
+                        </div>
                         </div>
 
                         <div class="form-row justify-content-center">

@@ -21,15 +21,26 @@ except ImportError:  # pragma: no cover - older versions
     from opentelemetry.propagators.baggage import W3CBaggagePropagator
 
 
-def stamp_app_attrs():
-    """Copy every app.* baggage entry onto the current span.
+# Only these baggage entries are copied onto spans (same allowlist as the other services, plus the
+# pre-existing non-PII request keys). Anything else - e.g. a legacy app.customer.email or app.session.id
+# from an older caller - is ignored so it can never reach the backend from this service.
+BAGGAGE_ALLOWLIST = frozenset({
+    "app.customer.id", "app.customer.authenticated", "app.order.id", "app.session.ref",
+    "app.order.channel", "app.prompt.version", "app.request.id", "app.currency", "app.prompt.category",
+})
 
-    Call at the entry of every gRPC handler so each span carries all
+
+def stamp_app_attrs():
+    """Copy allowlisted app.* baggage entries onto the current span.
+
+    Call at the entry of every gRPC handler so each span carries the
     attributes that exist at that point in the request flow.
     """
     span = trace_api.get_current_span()
     for key, value in baggage_api.get_all().items():
-        if key.startswith("app."):
+        if key in BAGGAGE_ALLOWLIST:
+            if key == "app.customer.authenticated":
+                value = str(value).lower() == "true"
             span.set_attribute(key, value)
 
 

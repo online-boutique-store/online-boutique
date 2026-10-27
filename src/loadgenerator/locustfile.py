@@ -103,8 +103,8 @@ def checkout(l):
         'street_address': fake.street_address(),
         'zip_code': fake.zipcode(),
         'city': fake.city(),
-        'state': fake.state_abbr(),
-        'country': fake.country(),
+        'state': random.choice(_CONTRACT_STATES),
+        'country': 'United States',
         'credit_card_number': fake.credit_card_number(card_type="visa"),
         'credit_card_expiration_month': random.randint(1, 12),
         'credit_card_expiration_year': random.randint(current_year, current_year + 70),
@@ -307,6 +307,27 @@ CHECKOUT_TURNS = int(_envf("ASSISTANT_CHECKOUT_TURNS", 14))
 PAYMENT_CHOICES = ["Visa ending 0454", "Visa ending 1111", "Mastercard ending 4444"]
 
 
+# Area codes libphonenumber treats as valid US numbers; 555-01xx is the reserved fictional range.
+_AREA_CODES = ["212", "310", "312", "404", "415", "512", "617", "646", "702", "713", "202", "206", "305", "503", "602"]
+_CONTRACT_STATES = ["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA",
+                    "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR",
+                    "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"]
+
+
+def _demo_phone(i):
+    return f"({_AREA_CODES[i % len(_AREA_CODES)]}) 555-{100 + i % 100:04d}"
+
+
+def _valid_state(f):
+    # Never a territory or military code: the account contract accepts the 50 states and DC only.
+    return f.random_element(_CONTRACT_STATES)
+
+
+def _city(f):
+    # Letters, spaces, apostrophes, periods and hyphens only (the contract's city rule).
+    return "".join(ch for ch in f.city() if ch.isalpha() or ch in " .'-").strip() or "Springfield"
+
+
 def _build_identities():
     f = Faker()
     f.seed_instance(20260101)  # deterministic: same emails after every restart
@@ -314,8 +335,9 @@ def _build_identities():
     for i in range(POOL_SIZE):
         first, last = f.first_name(), f.last_name()
         out.append({"name": f"{first} {last}", "first": first, "last": last, "email": f"demo.customer{i:03d}@example.com",
-                    "street": f.street_address(), "city": f.city(), "state": f.state_abbr(),
-                    "zip": f.zipcode(), "country": "United States"})
+                    "phone": _demo_phone(i), "street": f.street_address().split(" Apt")[0].split(" Suite")[0],
+                    "line2": f"Apt {1 + i % 40}" if i % 3 == 0 else "", "city": _city(f),
+                    "state": _valid_state(f), "zip": f.zipcode(), "country": "US"})
     return out
 
 
@@ -336,7 +358,8 @@ def _pick_identity():
 
 
 def _addr_text(p):
-    return f"{p['street']}, {p['city']}, {p['state']} {p['zip']}, {p['country']}"
+    street = p["street"] + (f", {p['line2']}" if p.get("line2") else "")
+    return f"{street}, {p['city']}, {p['state']} {p['zip']}"
 
 
 def _checkout_reply(kind, p, stage, tries, currency):
@@ -347,7 +370,7 @@ def _checkout_reply(kind, p, stage, tries, currency):
         if kind == "guest":
             return f"I'll check out as a guest. My email is {p['email']}."
         return (f"I'm new here, please create an account for me. My first name is {p['first']} and my last name is {p['last']}, "
-                f"my email is {p['email']}, and I live at {_addr_text(p)}.")
+                f"my email is {p['email']}, my phone number is {p['phone']}, and I live at {_addr_text(p)}.")
     if stage == "shipping":
         return f"Please ship it to {_addr_text(p)}."
     if stage == "payment":
@@ -458,3 +481,196 @@ class AssistantUser(FastHttpUser):
         name = _wchoice(self._mix)
         SCENARIOS[name](Conversation(self, name))
 
+
+# ---------------------------------------------------------------------------
+# Signed-in customer journeys (the storefront account experience).
+#
+# login (or create the account on first use) -> dashboard -> order history + one order's detail ->
+# edit an address -> add a demo payment method -> authenticated checkout with the saved card ->
+# optional replay of the same checkout -> logout. Every identity is a synthetic, contract-valid
+# demo.webcustomerNNN@example.com; payment is by synthetic catalog card only (no card numbers are typed).
+# Knobs (env, all optional):
+#   CUSTOMER_USERS_WEIGHT     weight of this class next to WEBSITE_USERS_WEIGHT (default 1)
+#   CUSTOMER_IDENTITY_POOL    distinct customers (default 10)
+#   CUSTOMER_PASSWORD         shared synthetic password (default Valid1Passw0rd)
+#   CUSTOMER_PRODUCTS         comma-separated product ids to buy (default: the storefront catalog)
+#   CUSTOMER_CHECKOUT_PROB    P(a journey ends with a checkout) (0.6)
+#   CUSTOMER_REPLAY_PROB      P(resubmit the SAME checkout once, exercising idempotent replay) (0.1)
+#   CUSTOMER_THINK_MIN/MAX    seconds between steps (1-6); the 30 rpm limit in front of the shop still applies
+# ---------------------------------------------------------------------------
+import re as _re
+from http.cookiejar import Cookie as _Cookie
+from urllib.parse import urlparse as _urlparse
+
+CUSTOMER_POOL = int(_envf("CUSTOMER_IDENTITY_POOL", 10))
+CUSTOMER_PASSWORD = os.getenv("CUSTOMER_PASSWORD", "Valid1Passw0rd")
+CUSTOMER_CHECKOUT_PROB = _envf("CUSTOMER_CHECKOUT_PROB", 0.6)
+CUSTOMER_REPLAY_PROB = _envf("CUSTOMER_REPLAY_PROB", 0.1)
+CUSTOMER_THINK_MIN = _envf("CUSTOMER_THINK_MIN", 1.0)
+CUSTOMER_THINK_MAX = _envf("CUSTOMER_THINK_MAX", 6.0)
+CUSTOMER_PRODUCTS = [x for x in os.getenv("CUSTOMER_PRODUCTS", "").split(",") if x] or products
+DEMO_CATALOG_IDS = ["demo_visa_1111", "demo_visa_4242", "demo_mc_4444", "demo_amex_0005", "demo_disc_1117"]
+
+_CSRF_RE = _re.compile(r'name="csrf"\s+value="([^"]+)"')
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
+def _build_customer_identities():
+    out = []
+    for i, p in enumerate(_build_identities()[:CUSTOMER_POOL]):
+        q = dict(p)
+        q["email"] = f"demo.webcustomer{i:03d}@example.com"
+        out.append(q)
+    return out
+
+
+CUSTOMER_IDENTITIES = _build_customer_identities()
+CUSTOMER_CREATED = set()  # emails this process has already created (or found existing)
+
+
+def _signup_form(p, csrf):
+    return {"first_name": p["first"], "last_name": p["last"], "email": p["email"], "phone": p["phone"],
+            "address_line1": p["street"], "address_line2": p["line2"], "city": p["city"], "state": p["state"],
+            "zip": p["zip"], "preferred_currency": "USD", "password": CUSTOMER_PASSWORD,
+            "confirm_password": CUSTOMER_PASSWORD, "csrf": csrf}
+
+
+class CustomerUser(FastHttpUser):
+    wait_time = between(CUSTOMER_THINK_MIN, CUSTOMER_THINK_MAX)
+    weight = int(os.getenv("CUSTOMER_USERS_WEIGHT", "1"))
+
+    def on_start(self):
+        self.who = random.choice(CUSTOMER_IDENTITIES)
+        self.signed_in = False
+
+    # -- small helpers --------------------------------------------------------------------------------
+    def _csrf(self, path):
+        with self.client.get(path, name=path, catch_response=True) as r:
+            m = _CSRF_RE.search(r.text or "")
+            if r.status_code != 200 or not m:
+                r.failure(f"no csrf form on {path}: {r.status_code}")
+                return None
+            return m.group(1)
+
+    def _has_session(self):
+        return any(c.name == "shop_account-session" and c.value for c in self.client.cookiejar)
+
+    def _think(self):
+        gevent.sleep(random.uniform(CUSTOMER_THINK_MIN, CUSTOMER_THINK_MAX) / 2)
+
+    def _seed_cookie(self, name, value):
+        host = _urlparse(self.host).hostname or "localhost"
+        domain = host if "." in host else host + ".local"
+        self.client.cookiejar.set_cookie(_Cookie(
+            0, name, value, None, False, domain, True, False, "/", True, False, None, True, None, None, {}, False))
+
+    # -- steps --------------------------------------------------------------------------------------------
+    def sign_in(self):
+        """First use of an identity in this process: create the account (a 422 'already exists' just means a
+        previous run made it). Afterwards, plain logins. Never logs in to an account that may not exist, so
+        the generator does not trip the storefront's failed-login throttle."""
+        if self.who["email"] not in CUSTOMER_CREATED:
+            csrf = self._csrf("/account/create")
+            if not csrf:
+                return False
+            with self.client.post("/account/create", _signup_form(self.who, csrf), name="/account/create [customer]",
+                                  catch_response=True) as r:
+                if r.status_code == 200 and self._has_session():
+                    CUSTOMER_CREATED.add(self.who["email"])
+                    self.signed_in = True
+                    return True
+                if r.status_code == 422 and "already exists" in (r.text or ""):
+                    CUSTOMER_CREATED.add(self.who["email"])
+                    r.success()
+                else:
+                    r.failure(f"signup failed: {r.status_code}")
+                    return False
+        csrf = self._csrf("/login")
+        if not csrf:
+            return False
+        with self.client.post("/login", {"email": self.who["email"], "password": CUSTOMER_PASSWORD, "csrf": csrf},
+                              name="/login [customer]", catch_response=True) as r:
+            if r.status_code == 200 and self._has_session():
+                self.signed_in = True
+                return True
+            r.failure(f"login failed: {r.status_code}")
+            return False
+
+    def browse_account(self):
+        self.client.get("/account", name="/account")
+        self._think()
+        with self.client.get("/account/orders", name="/account/orders", catch_response=True) as r:
+            ids = _re.findall(r"/account/orders/(" + _UUID + ")", r.text or "")
+        if ids:
+            self.client.get(f"/account/orders/{random.choice(ids)}", name="/account/orders/[id]")
+        self._think()
+
+    def edit_address(self):
+        with self.client.get("/account/addresses", name="/account/addresses", catch_response=True) as r:
+            ids = _re.findall(r"/account/addresses/(" + _UUID + ")/edit", r.text or "")
+        if not ids:
+            return
+        aid = ids[0]
+        csrf = self._csrf(f"/account/addresses/{aid}/edit")
+        if not csrf:
+            return
+        p = self.who
+        line2 = random.choice(["", "Apt 4B", "Suite 200", "Unit 7"])
+        self.client.post(f"/account/addresses/{aid}/edit", {
+            "address_line1": p["street"], "address_line2": line2, "city": p["city"], "state": p["state"], "zip": p["zip"],
+            "country": "US", "csrf": csrf}, name="/account/addresses/[id]/edit")
+
+    def ensure_payment_method(self):
+        with self.client.get("/account/payment-methods", name="/account/payment-methods", catch_response=True) as r:
+            have = bool(_re.findall(r"/account/payment-methods/(" + _UUID + ")/delete", r.text or ""))
+            m = _CSRF_RE.search(r.text or "")
+        if have or not m:
+            return
+        self.client.post("/account/payment-methods/add", {"catalog_id": random.choice(DEMO_CATALOG_IDS), "make_default": "on",
+                                                          "csrf": m.group(1)}, name="/account/payment-methods/add")
+
+    def checkout_saved_card(self):
+        product = random.choice(CUSTOMER_PRODUCTS)
+        self.client.get("/product/" + product, name="/product/[id]")
+        self.client.post("/cart", {"product_id": product, "quantity": random.randint(1, 3)}, name="/cart [add]")
+        with self.client.get("/cart", name="/cart", catch_response=True) as r:
+            m = _re.search(r'name="payment_method_id"\s+value="(' + _UUID + ')"', r.text or "")
+        p = self.who
+        form = {"email": p["email"], "street_address": p["street"], "zip_code": p["zip"][:5], "city": p["city"],
+                "state": p["state"], "country": "United States"}
+        if m:
+            form["payment_method_id"] = m.group(1)
+        else:   # no saved card (e.g. accountservice down): fall back to the card form like a guest would
+            form.update({"credit_card_number": "4432801561520454", "credit_card_expiration_month": "1",
+                         "credit_card_expiration_year": str(datetime.datetime.now().year + 2), "credit_card_cvv": "672"})
+        replay = random.random() < CUSTOMER_REPLAY_PROB
+        key = "co-lg" + uuid.uuid4().hex[:20]
+        if replay:
+            self._seed_cookie("shop_checkout-key", key)
+        self.client.post("/cart/checkout", form, name="/cart/checkout [customer]")
+        if replay:
+            # Same idempotency key again (the storefront clears it after success): checkout must replay the
+            # original order, never charge twice.
+            self._seed_cookie("shop_checkout-key", key)
+            self.client.post("/cart/checkout", form, name="/cart/checkout [customer replay]")
+
+    def sign_out(self):
+        csrf = self._csrf("/logout")
+        if csrf:
+            self.client.post("/logout", {"csrf": csrf}, name="/logout [customer]")
+            self.signed_in = False
+
+    @task
+    def journey(self):
+        if not self.signed_in and not self.sign_in():
+            gevent.sleep(random.uniform(5, 15))
+            return
+        self.browse_account()
+        if random.random() < 0.3:
+            self.edit_address()
+        self.ensure_payment_method()
+        if random.random() < CUSTOMER_CHECKOUT_PROB:
+            self.checkout_saved_card()
+        self._think()
+        if random.random() < 0.7:
+            self.sign_out()

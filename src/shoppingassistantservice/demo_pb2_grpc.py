@@ -5,7 +5,7 @@ import warnings
 
 import demo_pb2 as demo__pb2
 
-GRPC_GENERATED_VERSION = '1.84.0'
+GRPC_GENERATED_VERSION = '1.85.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -452,6 +452,11 @@ class ShippingServiceStub:
                 request_serializer=demo__pb2.ShipOrderRequest.SerializeToString,
                 response_deserializer=demo__pb2.ShipOrderResponse.FromString,
                 _registered_method=True)
+        self.GetShipment = channel.unary_unary(
+                '/hipstershop.ShippingService/GetShipment',
+                request_serializer=demo__pb2.GetShipmentRequest.SerializeToString,
+                response_deserializer=demo__pb2.GetShipmentResponse.FromString,
+                _registered_method=True)
 
 
 class ShippingServiceServicer:
@@ -471,6 +476,12 @@ class ShippingServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetShipment(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ShippingServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -483,6 +494,11 @@ def add_ShippingServiceServicer_to_server(servicer, server):
                     servicer.ShipOrder,
                     request_deserializer=demo__pb2.ShipOrderRequest.FromString,
                     response_serializer=demo__pb2.ShipOrderResponse.SerializeToString,
+            ),
+            'GetShipment': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetShipment,
+                    request_deserializer=demo__pb2.GetShipmentRequest.FromString,
+                    response_serializer=demo__pb2.GetShipmentResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -541,6 +557,33 @@ class ShippingService:
             '/hipstershop.ShippingService/ShipOrder',
             demo__pb2.ShipOrderRequest.SerializeToString,
             demo__pb2.ShipOrderResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetShipment(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hipstershop.ShippingService/GetShipment',
+            demo__pb2.GetShipmentRequest.SerializeToString,
+            demo__pb2.GetShipmentResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -689,6 +732,16 @@ class PaymentServiceStub:
                 request_serializer=demo__pb2.ChargeRequest.SerializeToString,
                 response_deserializer=demo__pb2.ChargeResponse.FromString,
                 _registered_method=True)
+        self.GetCharge = channel.unary_unary(
+                '/hipstershop.PaymentService/GetCharge',
+                request_serializer=demo__pb2.GetChargeRequest.SerializeToString,
+                response_deserializer=demo__pb2.GetChargeResponse.FromString,
+                _registered_method=True)
+        self.Tokenize = channel.unary_unary(
+                '/hipstershop.PaymentService/Tokenize',
+                request_serializer=demo__pb2.TokenizeRequest.SerializeToString,
+                response_deserializer=demo__pb2.TokenizeResponse.FromString,
+                _registered_method=True)
 
 
 class PaymentServiceServicer:
@@ -702,6 +755,21 @@ class PaymentServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetCharge(self, request, context):
+        """Lookup by idempotency key; used by checkout to resolve an uncertain payment without charging again.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Tokenize(self, request, context):
+        """Synthetic demo cards only: exchanges a catalog id for an opaque token bound server-side to that
+        entry. Anything that is not a catalog id (including real-looking card numbers) is rejected.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_PaymentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -709,6 +777,16 @@ def add_PaymentServiceServicer_to_server(servicer, server):
                     servicer.Charge,
                     request_deserializer=demo__pb2.ChargeRequest.FromString,
                     response_serializer=demo__pb2.ChargeResponse.SerializeToString,
+            ),
+            'GetCharge': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCharge,
+                    request_deserializer=demo__pb2.GetChargeRequest.FromString,
+                    response_serializer=demo__pb2.GetChargeResponse.SerializeToString,
+            ),
+            'Tokenize': grpc.unary_unary_rpc_method_handler(
+                    servicer.Tokenize,
+                    request_deserializer=demo__pb2.TokenizeRequest.FromString,
+                    response_serializer=demo__pb2.TokenizeResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -740,6 +818,60 @@ class PaymentService:
             '/hipstershop.PaymentService/Charge',
             demo__pb2.ChargeRequest.SerializeToString,
             demo__pb2.ChargeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCharge(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hipstershop.PaymentService/GetCharge',
+            demo__pb2.GetChargeRequest.SerializeToString,
+            demo__pb2.GetChargeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Tokenize(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hipstershop.PaymentService/Tokenize',
+            demo__pb2.TokenizeRequest.SerializeToString,
+            demo__pb2.TokenizeResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -149,6 +149,8 @@ class FakeBedrock(BaseHTTPRequestHandler):
                 text = f"Order {data['order_id']} placed."
             elif "results" in data:
                 text = "I found Mug [6E92ZMYYFZ]."
+            elif status == "login_required":
+                text = "Please log in on the storefront to see your orders."
             elif status == "started":
                 text = "Happy to help. What is your email address?"
             elif data.get("found") is False:
@@ -177,6 +179,8 @@ class FakeBedrock(BaseHTTPRequestHandler):
                 text = "Done."
         elif "again" in user:
             content, stop = call("place_order", {}, "tu_retry")
+        elif "my orders" in user:
+            content, stop = call("list_orders", {}, "tu_orders")
         elif "check out" in user or "checkout" in user:
             content, stop = call("start_checkout", {}, "tu_start")
         elif "@" in user:
