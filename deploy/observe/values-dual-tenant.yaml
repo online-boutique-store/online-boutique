@@ -1,0 +1,49 @@
+# Helm values overlay for the EXISTING personal agent (release observe-agent, ns observe).
+#
+# Fans the apps' OTLP traces, OTLP logs and app metrics out to the SECOND agent's
+# forwarder (release observe-agent-demo, ns observe-demo) over the in-cluster
+# Service. The second agent stamps deployment.environment=field-demo-ai-app,
+# generates its own RED span metrics, and ships to the shared demo tenant.
+# No staging token or endpoint appears here, and the personal exporters are
+# unchanged.
+#
+# Span-metric pipelines are intentionally NOT forwarded: the demo agent derives
+# its own RED metrics from the forwarded traces.
+#
+# Lists are REPLACED by the collector config merge, so each pipeline repeats its
+# original exporter next to the new one.
+#
+# Apply (keeps all existing values):
+#   helm upgrade observe-agent observe/agent -n observe --version 0.94.0 \
+#     --reuse-values -f deploy/observe/values-dual-tenant.yaml
+agent:
+  config:
+    forwarder:
+      exporters:
+        otlp/demo:
+          endpoint: observe-agent-demo-forwarder.observe-demo.svc.cluster.local:4317
+          tls:
+            insecure: true
+          compression: gzip
+          retry_on_failure:
+            enabled: true
+            initial_interval: 1s
+            max_elapsed_time: 2m
+            max_interval: 30s
+          sending_queue:
+            enabled: true
+          timeout: 10s
+      service:
+        pipelines:
+          traces/observe-forward:
+            exporters:
+              - otlphttp/observe/forward/trace
+              - otlp/demo
+          logs/observe-forward:
+            exporters:
+              - otlphttp/observe/base
+              - otlp/demo
+          metrics/observe-forward:
+            exporters:
+              - otlphttp/observe/otel_metrics
+              - otlp/demo

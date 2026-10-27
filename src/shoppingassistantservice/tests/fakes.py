@@ -12,6 +12,7 @@ metrics, and that backend failures are reported honestly.
 """
 import json
 import os
+import re
 import sys
 import threading
 from concurrent import futures
@@ -78,6 +79,8 @@ class Currency(pbg.CurrencyServiceServicer):
 
 class Checkout(pbg.CheckoutServiceServicer):
     def PlaceOrder(self, req, ctx):
+        from opentelemetry import baggage
+        SEEN_BAGGAGE.append(dict(baggage.get_all()))
         # Real checkout converts every item via the currency service and wraps any
         # failure as codes.Internal ("failed to convert price ...").
         cur = pbg.CurrencyServiceStub(grpc.insecure_channel(os.environ["CURRENCY_SERVICE_ADDR"]))
@@ -134,24 +137,64 @@ class FakeBedrock(BaseHTTPRequestHandler):
             return [{"toolUse": {"toolUseId": cid, "name": name, "input": args}}], "tool_use"
 
         results = [c["toolResult"] for c in last if "toolResult" in c]
+        emails = re.findall(r"[\w.+-]+@[\w.-]+\.\w+", " ".join(user_texts))
+        email = emails[-1] if emails else "shopper@example.com"
+        text = None
         if results:
             data = results[0]["content"][0]["json"]
+            status = data.get("status")
             if "error" in data:
-                content, stop = [{"text": "Sorry, that failed: " + data["error"]}], "end_turn"
+                text = "Sorry, that failed: " + data["error"]
             elif "order_id" in data:
-                content, stop = [{"text": f"Order {data['order_id']} placed."}], "end_turn"
+                text = f"Order {data['order_id']} placed."
             elif "results" in data:
-                content, stop = [{"text": "I found Mug [6E92ZMYYFZ]."}], "end_turn"
+                text = "I found Mug [6E92ZMYYFZ]."
+            elif status == "started":
+                text = "Happy to help. What is your email address?"
+            elif data.get("found") is False:
+                ship = re.search(r"ship to ([^,]+), ([^,]+), ([A-Z]{2}) (\d{5})", " ".join(user_texts))
+                street, city, st, zp = ship.groups() if ship else ("1 Main St", "Austin", "TX", "73301")
+                content, stop = call("create_account", dict(
+                    first_name="Demo", last_name="Shopper", email=email, street_address=street, city=city,
+                    state=st, zip_code=zp, country="United States"), "tu_create")
+            elif status == "account_unavailable":
+                text = "Your saved account details are temporarily unavailable. I can retry shortly or continue as a guest if you prefer."
+            elif data.get("found") is True:
+                text = "Welcome back. Which currency would you like to pay in?"
+            elif status == "account_created":
+                text = "Account created. Which payment method would you like to use?"
+            elif status == "payment_selected":
+                text = "Which currency would you like to pay in?"
+            elif status == "currency_set":
+                content, stop = call("review_order", {}, "tu_review")
+            elif status == "review":
+                text = "Here is your order summary. Shall I place the order?"
+            elif status == "confirmed":
+                content, stop = call("place_order", {}, "tu_place")
+            elif status == "needs_info":
+                text = "I still need: " + data.get("reason", "more details")
             else:
-                content, stop = [{"text": "Done."}], "end_turn"
+                text = "Done."
+        elif "again" in user:
+            content, stop = call("place_order", {}, "tu_retry")
         elif "check out" in user or "checkout" in user:
-            desc = tools["place_order"]["inputSchema"]["json"]["properties"]["currency_code"]["description"]
+            content, stop = call("start_checkout", {}, "tu_start")
+        elif "@" in user:
+            content, stop = call("lookup_account", {"email": email}, "tu_lookup")
+        elif "visa" in user:
+            content, stop = call("set_payment", {"payment_method_id": "pm_demo_visa"}, "tu_pay")
+        elif "yen" in user:
+            desc = tools["set_currency"]["inputSchema"]["json"]["properties"]["currency_code"]["description"]
             code = "Japanese Yen" if "written the way the customer said it" in desc else "JPY"
-            content, stop = call("place_order", {"currency_code": code}, "tu_co")
+            content, stop = call("set_currency", {"currency_code": code}, "tu_cur")
+        elif user.startswith("yes"):
+            content, stop = call("confirm_order", {}, "tu_confirm")
         elif "add" in user:
             content, stop = call("add_to_cart", {"product_id": "6E92ZMYYFZ", "quantity": 2}, "tu_add")
         else:
             content, stop = call("search_products", {"query": "mug"}, "tu_s")
+        if text is not None:
+            content, stop = [{"text": text}], "end_turn"
         out = {"output": {"message": {"role": "assistant", "content": content}}, "stopReason": stop,
                "usage": {"inputTokens": 120, "outputTokens": 20, "totalTokens": 140},
                "metrics": {"latencyMs": 3}}

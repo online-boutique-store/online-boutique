@@ -87,12 +87,16 @@ metadata:
   name: cartservice
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: redis-cart
   labels:
     app: redis-cart
 spec:
+  # Durable storage: accounts created by the shopping assistant live here too, and
+  # must survive pod restarts and rescheduling (AOF on a PVC, not emptyDir).
+  serviceName: redis-cart
+  replicas: 1
   selector:
     matchLabels:
       app: redis-cart
@@ -116,6 +120,7 @@ spec:
           privileged: false
           readOnlyRootFilesystem: true
         image: redis:alpine
+        args: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--dir", "/data"]
         ports:
         - containerPort: 6379
         readinessProbe:
@@ -136,9 +141,15 @@ spec:
           requests:
             cpu: 70m
             memory: 200Mi
-      volumes:
-      - name: redis-data
-        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: gp2
+      resources:
+        requests:
+          storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

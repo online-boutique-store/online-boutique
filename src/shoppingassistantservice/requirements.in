@@ -8,3 +8,8 @@ opentelemetry-exporter-otlp-proto-grpc==1.45.1
 opentelemetry-instrumentation-botocore==0.66b1
 opentelemetry-instrumentation-flask==0.66b1
 opentelemetry-instrumentation-grpc==0.66b1
+redis==5.2.1
+opentelemetry-instrumentation-redis==0.66b1
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3
+opentelemetry-instrumentation-psycopg==0.66b1

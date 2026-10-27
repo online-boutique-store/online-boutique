@@ -45,6 +45,15 @@ CART_ADDR = os.environ.get("CART_SERVICE_ADDR", "cartservice:7070")
 CURRENCY_ADDR = os.environ.get("CURRENCY_SERVICE_ADDR", "currencyservice:7000")
 CHECKOUT_ADDR = os.environ.get("CHECKOUT_SERVICE_ADDR", "checkoutservice:5050")
 GRPC_TIMEOUT_S = _int("GRPC_TIMEOUT_S", 15)
+# Customer accounts live in the existing redis-cart (needs a durable volume).
+REDIS_ADDR = os.environ.get("REDIS_ADDR", "redis-cart:6379")
+CHECKOUT_ABANDON_AFTER_S = _int("CHECKOUT_ABANDON_AFTER_S", 600)
+
+# --- Accounts database (Postgres) -------------------------------------------
+ACCOUNTS_DATABASE_URL = os.environ.get("ACCOUNTS_DATABASE_URL", "")
+ACCOUNTS_DB_POOL_MAX = _int("ACCOUNTS_DB_POOL_MAX", 5)
+ACCOUNTS_DB_STATEMENT_TIMEOUT_MS = _int("ACCOUNTS_DB_STATEMENT_TIMEOUT_MS", 3000)
+ACCOUNTS_MIGRATION_RETRY_MAX_S = _int("ACCOUNTS_MIGRATION_RETRY_MAX_S", 30)
 
 PORT = _int("PORT", 8080)
 

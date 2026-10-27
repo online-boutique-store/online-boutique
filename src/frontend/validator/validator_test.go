@@ -70,6 +70,9 @@ func TestPlaceOrderFailsValidation(t *testing.T) {
 		ccYear        int64
 		ccCVV         int64
 	}{
+		{"email without tld", "test@example.", "12345 example street", 10004, "New York", "New York", "United States", "5272940000751666", 4, 2024, 584},
+		{"email with numeric tld", "test@example.123", "12345 example street", 10004, "New York", "New York", "United States", "5272940000751666", 4, 2024, 584},
+		{"email with one-letter tld", "test@example.c", "12345 example street", 10004, "New York", "New York", "United States", "5272940000751666", 4, 2024, 584},
 		{"invalid email", "test@example", "12345 example street", 10004, "New York", "New York", "United States", "5272940000751666", 4, 2024, 584},
 		{"invalid address (too long)", "test@example.com", strings.Repeat("12345 example street", 513), 10004, "New York", "New York", "United States", "5272940000751666", 4, 2024, 584},
 		{"invalid zip code", "test@example.com", "12345 example street", 0, "New York", "New York", "United States", "5272940000751666", 4, 2024, 584},

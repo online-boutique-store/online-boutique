@@ -1,0 +1,18 @@
+# OPTIONAL scrape overlay for the accounts database exporter. NOT applied automatically.
+# The demo agent currently runs with application.prometheusScrape.enabled=false. Two options,
+# to be chosen (and the exact chart keys verified with `helm show values` for the installed
+# chart version) during the gated rollout:
+#
+# (a) Annotation based, restricted to this namespace/service - merge into values-demo-agent.yaml:
+application:
+  prometheusScrape:
+    enabled: true
+    # Verify these key names against the installed chart before use.
+    namespaces:
+      - online-boutique
+    # accounts-db-metrics carries prometheus.io/scrape|port|path annotations; no other service
+    # in the namespace is annotated, so nothing else is scraped.
+#
+# (b) Static job on the prometheus-scraper component pointing at
+#     accounts-db-metrics.online-boutique.svc.cluster.local:9187/metrics
+#     (use if (a) cannot be scoped tightly enough).

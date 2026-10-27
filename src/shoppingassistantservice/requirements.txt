@@ -14,11 +14,14 @@ opentelemetry-api==1.45.1
 opentelemetry-exporter-otlp-common==0.66b1
 opentelemetry-exporter-otlp-proto-common==1.45.1
 opentelemetry-exporter-otlp-proto-grpc==1.45.1
-opentelemetry-instrumentation==0.66b1
 opentelemetry-instrumentation-botocore==0.66b1
+opentelemetry-instrumentation-dbapi==0.66b1
 opentelemetry-instrumentation-flask==0.66b1
 opentelemetry-instrumentation-grpc==0.66b1
+opentelemetry-instrumentation-psycopg==0.66b1
+opentelemetry-instrumentation-redis==0.66b1
 opentelemetry-instrumentation-wsgi==0.66b1
+opentelemetry-instrumentation==0.66b1
 opentelemetry-propagator-aws-xray==1.0.2
 opentelemetry-proto==1.45.1
 opentelemetry-sdk==1.45.1
@@ -26,7 +29,11 @@ opentelemetry-semantic-conventions==0.66b1
 opentelemetry-util-http==0.66b1
 packaging==26.3
 protobuf==7.36.2
+psycopg-binary==3.3.6
+psycopg-pool==3.3.3
+psycopg==3.3.6
 python-dateutil==2.9.0.post0
+redis==5.2.1
 s3transfer==0.19.2
 six==1.17.0
 typing_extensions==4.16.0

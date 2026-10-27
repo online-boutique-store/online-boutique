@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: online-boutique
+  labels:
+    local-gate: ob-gate
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observe
+  labels:
+    local-gate: ob-gate
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ob-upgrade
+  labels:
+    local-gate: ob-gate
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp2
+  labels:
+    local-gate: ob-gate
+provisioner: rancher.io/local-path
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true

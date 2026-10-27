@@ -244,7 +244,8 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	ctx = withBaggage(ctx, "app.order.id", orderID.String())
 	ctx = withBaggage(ctx, "app.customer.id", req.UserId)
 	ctx = withBaggage(ctx, "app.customer.email", req.Email)
-	ctx = withBaggage(ctx, "app.customer.city", req.Address.GetCity())
+	// City is part of the shipping address and must not leave in telemetry;
+	// state/country stay as coarse region dimensions.
 	ctx = withBaggage(ctx, "app.customer.state", req.Address.GetState())
 	ctx = withBaggage(ctx, "app.customer.country", req.Address.GetCountry())
 	stampAppAttrs(ctx)

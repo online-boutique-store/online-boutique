@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-otel-collector
+  namespace: observe
+data:
+  otel-collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 128
+        spike_limit_mib: 32
+    exporters:
+      file/traces:
+        path: /telemetry/traces.json
+        format: json
+      file/metrics:
+        path: /telemetry/metrics.json
+        format: json
+      file/logs:
+        path: /telemetry/logs.json
+        format: json
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [file/traces, debug]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [file/metrics, debug]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter]
+          exporters: [file/logs, debug]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observe-agent-forwarder
+  namespace: observe
+  labels:
+    app: local-otel-collector
+spec:
+  selector:
+    app: local-otel-collector
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-otel-collector
+  namespace: observe
+  labels:
+    app: local-otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: local-otel-collector
+  template:
+    metadata:
+      labels:
+        app: local-otel-collector
+    spec:
+      containers:
+      - name: collector
+        image: otel/opentelemetry-collector-contrib:0.111.0
+        args: ["--config=/conf/otel-collector.yaml"]
+        ports:
+        - name: otlp-grpc
+          containerPort: 4317
+        - name: otlp-http
+          containerPort: 4318
+        volumeMounts:
+        - name: config
+          mountPath: /conf
+          readOnly: true
+        - name: telemetry
+          mountPath: /telemetry
+        readinessProbe:
+          tcpSocket: {port: otlp-grpc}
+          periodSeconds: 5
+        resources:
+          requests: {cpu: 100m, memory: 192Mi}
+          limits: {cpu: 300m, memory: 384Mi}
+      volumes:
+      - name: config
+        configMap:
+          name: local-otel-collector
+      - name: telemetry
+        hostPath:
+          path: /telemetry
+          type: DirectoryOrCreate

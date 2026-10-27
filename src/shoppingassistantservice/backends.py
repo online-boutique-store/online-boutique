@@ -149,22 +149,25 @@ def get_cart(user_id):
         return _err(e)
 
 
-# Synthetic customer data - this is a demo store, nothing here is real.
-_ADDRESS = dict(street_address="1600 Amphitheatre Parkway", city="Mountain View",
-                state="CA", country="United States", zip_code=94043)
-_TEST_CARD = "4432-8015-6152-0454"  # the stock Online Boutique test Visa
+def _zip_int(z):
+    digits = "".join(c for c in str(z) if c.isdigit())
+    return int(digits[:9] or 0)
 
 
-def place_order(user_id, currency_code):
+def place_order(user_id, currency_code, email, address, card_number):
+    """Charge the cart. `card_number` is a synthetic TEST card resolved from a payment
+    method id; it is only handed to checkoutservice and is never logged or traced."""
     year = datetime.date.today().year + 2
     try:
         resp = _checkout().PlaceOrder(pb.PlaceOrderRequest(
             user_id=user_id,
             user_currency=currency_code,
-            address=pb.Address(**_ADDRESS),
-            email=f"{user_id[:8]}@example.com",
+            address=pb.Address(street_address=address["street_address"], city=address["city"],
+                               state=address["state"], country=address["country"],
+                               zip_code=_zip_int(address["zip_code"])),
+            email=email,
             credit_card=pb.CreditCardInfo(
-                credit_card_number=_TEST_CARD, credit_card_cvv=672,
+                credit_card_number=card_number, credit_card_cvv=672,
                 credit_card_expiration_year=year, credit_card_expiration_month=1)),
             timeout=config.GRPC_TIMEOUT_S)
         o = resp.order
@@ -185,5 +188,4 @@ TOOLS = {
     "convert_price": convert_price,
     "add_to_cart": add_to_cart,
     "get_cart": get_cart,
-    "place_order": place_order,
 }

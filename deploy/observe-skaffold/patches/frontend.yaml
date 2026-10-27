@@ -14,6 +14,11 @@ spec:
           env:
             - name: OTEL_SERVICE_NAME
               value: frontend
+            - name: ACCOUNT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: shopping-assistant-account-api
+                  key: ACCOUNT_API_SECRET
             - name: K8S_POD_NAME
               valueFrom:
                 fieldRef:

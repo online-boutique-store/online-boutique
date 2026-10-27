@@ -17,6 +17,7 @@ package validator
 import (
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -28,7 +29,14 @@ var validate *validator.Validate
 // benefit of caching struct info and validations.
 func init() {
 	validate = validator.New(validator.WithRequiredStructEnabled())
+	_ = validate.RegisterValidation("emailtld", func(fl validator.FieldLevel) bool {
+		v := fl.Field().String()
+		return len(v) <= 254 && emailTLD.MatchString(v)
+	})
 }
+
+// emailTLD requires a dotted domain that ends in an alphabetic TLD (.com, .edu, .org, ...).
+var emailTLD = regexp.MustCompile(`^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$`)
 
 type Payload interface {
 	Validate() error
@@ -40,7 +48,7 @@ type AddToCartPayload struct {
 }
 
 type PlaceOrderPayload struct {
-	Email         string `validate:"required,email"`
+	Email         string `validate:"required,email,emailtld"`
 	StreetAddress string `validate:"required,max=512"`
 	ZipCode       int64  `validate:"required"`
 	City          string `validate:"required,max=128"`

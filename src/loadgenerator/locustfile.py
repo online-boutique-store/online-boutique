@@ -148,7 +148,7 @@ class WebsiteUser(FastHttpUser):
 #   ASSISTANT_USERS_WEIGHT   users of this class per WEBSITE_USERS_WEIGHT (default 1)
 #   ASSISTANT_THINK_MIN/MAX  seconds between turns inside a conversation (8-25)
 #   ASSISTANT_GAP_MIN/MAX    seconds between conversations (30-90)
-#   ASSISTANT_MAX_TURNS      hard cap on prompts per conversation (7)
+#   ASSISTANT_MAX_TURNS      hard cap on prompts per conversation (7; checkout uses ASSISTANT_CHECKOUT_TURNS)
 #   ASSISTANT_SCENARIOS      "name=weight,..." mix, see SCENARIOS below
 #   ASSISTANT_WHY_PROB       P(ask "why didn't it work?") after a failed checkout (0.85)
 #   ASSISTANT_RETRY_PROB     P(ask to retry) after a failed checkout (0.7)
@@ -211,19 +211,26 @@ class Conversation:
         self.user, self.name = user, name
         self.id = f"{user.customer_id[:8]}-{uuid.uuid4().hex[:8]}"
         self.turns = 0
+        self.max_turns = MAX_TURNS
         self.last = {}
 
     def done(self):
-        return self.turns >= MAX_TURNS
+        return self.turns >= self.max_turns
 
     def say(self, category, text):
         if self.done():
             return None
+        if self.turns == 0 and category not in OPENING_CATEGORIES:
+            # Safety net: no scenario may open a conversation with anything but a shopping question.
+            self.say("product_browsing", opening_question())
+            if self.done():
+                return None
         if self.turns:
             gevent.sleep(random.uniform(THINK_MIN, THINK_MAX))
         self.turns += 1
         headers = dict(customer_headers(self.user))
         headers.update({"X-Prompt-Category": category, "X-Conversation-ID": self.id,
+                        "X-Customer-Synthetic": "true",
                         "Content-Type": "application/json"})
         with self.user.client.post("/bot", json={"message": text}, headers=headers,
                                    name=f"/bot [{category}]", catch_response=True) as r:
@@ -240,6 +247,22 @@ class Conversation:
 
     def checkout_failed(self):
         return self.last.get("outcome") in ("tool_error", "llm_error", "max_steps")
+
+
+# Every conversation OPENS with a relevant product/shopping question. Support, off-topic and
+# injection prompts are still sent (they must keep reaching the model for AI Observability), but
+# only as a LATER turn of a conversation that has already started with shopping.
+OPENING_CATEGORIES = ("product_browsing", "product_comparison", "cart_operation")
+OPENING_QUESTIONS = [
+    "Find me a {p} under ${b}.",
+    "Do you have any {p}s?",
+    "What kind of {p} do you sell?",
+    "Show me a {p}.",
+]
+
+
+def opening_question():
+    return random.choice(OPENING_QUESTIONS).format(p=random.choice(ASSISTANT_PRODUCTS), b=_budget())
 
 
 def _budget():
@@ -272,19 +295,101 @@ def sc_cart(c):
     c.say("cart_operation", "What's in my cart right now?")
 
 
+# --- identity pool: a stable set of synthetic customers so some sessions are RETURNING ---
+#   ASSISTANT_IDENTITY_POOL   number of synthetic identities (25)
+#   ASSISTANT_RETURNING_PROB  P(checkout uses an already-created account) (0.4)
+#   ASSISTANT_GUEST_PROB      P(checkout as a guest, no account) (0.15)
+#   ASSISTANT_CHECKOUT_TURNS  turn cap for a guided checkout conversation (14)
+POOL_SIZE = int(_envf("ASSISTANT_IDENTITY_POOL", 25))
+RETURNING_PROB = _envf("ASSISTANT_RETURNING_PROB", 0.4)
+GUEST_PROB = _envf("ASSISTANT_GUEST_PROB", 0.15)
+CHECKOUT_TURNS = int(_envf("ASSISTANT_CHECKOUT_TURNS", 14))
+PAYMENT_CHOICES = ["Visa ending 0454", "Visa ending 1111", "Mastercard ending 4444"]
+
+
+def _build_identities():
+    f = Faker()
+    f.seed_instance(20260101)  # deterministic: same emails after every restart
+    out = []
+    for i in range(POOL_SIZE):
+        first, last = f.first_name(), f.last_name()
+        out.append({"name": f"{first} {last}", "first": first, "last": last, "email": f"demo.customer{i:03d}@example.com",
+                    "street": f.street_address(), "city": f.city(), "state": f.state_abbr(),
+                    "zip": f.zipcode(), "country": "United States"})
+    return out
+
+
+IDENTITIES = _build_identities()
+CREATED = set()  # indices whose account exists (created by this load generator process)
+
+
+def _pick_identity():
+    """-> (kind, index). kind: guest | returning | new."""
+    if random.random() < GUEST_PROB:
+        return "guest", random.randrange(len(IDENTITIES))
+    if CREATED and random.random() < RETURNING_PROB:
+        return "returning", random.choice(sorted(CREATED))
+    free = [i for i in range(len(IDENTITIES)) if i not in CREATED]
+    if free:
+        return "new", random.choice(free)
+    return "returning", random.choice(sorted(CREATED))
+
+
+def _addr_text(p):
+    return f"{p['street']}, {p['city']}, {p['state']} {p['zip']}, {p['country']}"
+
+
+def _checkout_reply(kind, p, stage, tries, currency):
+    """Customer's next message, chosen from the agent's STRUCTURED checkout stage."""
+    if stage == "identify":
+        if kind == "returning" and tries["identify"] < 2:
+            return f"My email is {p['email']}."
+        if kind == "guest":
+            return f"I'll check out as a guest. My email is {p['email']}."
+        return (f"I'm new here, please create an account for me. My first name is {p['first']} and my last name is {p['last']}, "
+                f"my email is {p['email']}, and I live at {_addr_text(p)}.")
+    if stage == "shipping":
+        return f"Please ship it to {_addr_text(p)}."
+    if stage == "payment":
+        return f"I'll pay with the {random.choice(PAYMENT_CHOICES)}."
+    if stage == "currency":
+        return random.choice([f"{currency}, please.", f"I'd like to pay in {currency}.",
+                              f"Let's do {currency}."])
+    if stage == "confirm":
+        return random.choice(["Yes, that looks right. Please place the order.", "Yes, go ahead and confirm it."])
+    return "Yes, go ahead."
+
+
 def sc_checkout(c):
-    """browse -> cart -> checkout in a currency NAME -> (if it failed) why / retry."""
+    """Guided checkout: browse -> cart -> "I'd like to check out" -> answer whatever the
+    agent asks (driven by its structured checkout stage) -> if it failed, why / retry."""
+    c.max_turns = max(MAX_TURNS, CHECKOUT_TURNS)
     c.say("product_browsing", f"Find me a {random.choice(ASSISTANT_PRODUCTS)} under ${_budget()}.")
     c.say("cart_operation", random.choice(["Add two to my cart.", "Add one to my cart.", "Add 3 of those to my cart."]))
-    currency = _wchoice(CURRENCY_NAMES)
+    kind, idx = _pick_identity()
+    person, currency = IDENTITIES[idx], _wchoice(CURRENCY_NAMES)
+    tries = {"identify": 0}
     c.say("checkout_request", random.choice([
-        f"Can you check out in {currency}?",
-        f"Please check out now and charge me in {currency}.",
-        f"I'm ready to buy, check out in {currency}."]))
-    # Claude sometimes asks "shall I place the order?" before charging; answer
-    # like a real customer would so the checkout actually happens.
-    if not c.checkout_failed() and "?" in (c.last.get("message") or ""):
-        c.say("checkout_request", random.choice(["Yes, go ahead.", "Yes please, place the order.", "Confirmed."]))
+        "I'd like to check out.", "I'm ready to check out.", "Let's check out."]))
+    while not c.done():
+        info = c.last.get("checkout") or {}
+        stage = info.get("stage")
+        if c.last.get("outcome") in ("llm_error", "rate_limited", "not_configured"):
+            return
+        if stage == "done":
+            break
+        if stage is None:
+            msg = "Yes, I'd like to check out now."
+        else:
+            if stage == "identify":
+                tries["identify"] += 1
+            msg = _checkout_reply(kind, person, stage, tries, currency)
+        if c.say("checkout_request", msg) is None:
+            return
+        if (c.last.get("checkout") or {}).get("customer_type") == "new":
+            CREATED.add(idx)
+        if c.checkout_failed() and (c.last.get("checkout") or {}).get("stage") != "done":
+            break
     if not c.checkout_failed():
         return
     if random.random() < WHY_PROB:
@@ -294,27 +399,34 @@ def sc_checkout(c):
         if random.random() >= RETRY_PROB:
             break
         c.say("failed_checkout_followup", random.choice([
-            "Can you try again?", "Please retry the checkout.", f"Try checking out again in {currency}."]))
+            "Can you try again?", "Please retry the checkout.", "Try placing the order again."]))
         if not c.checkout_failed():
             break
 
 
+def _shopping_opener(c):
+    c.say("product_browsing", opening_question())
+
+
 def sc_support(c):
+    _shopping_opener(c)
     c.say("customer_support", random.choice(SUPPORT_PROMPTS))
 
 
 def sc_offtopic(c):
+    _shopping_opener(c)
     c.say("off_topic", random.choice(OFF_TOPIC_PROMPTS))
 
 
 def sc_injection(c):
+    _shopping_opener(c)
     c.say("prompt_injection", random.choice(INJECTION_PROMPTS))
 
 
 SCENARIOS = {"browse": sc_browse, "compare": sc_compare, "currency": sc_currency,
              "cart": sc_cart, "checkout": sc_checkout, "support": sc_support,
              "offtopic": sc_offtopic, "injection": sc_injection}
-DEFAULT_MIX = "browse=28,compare=10,currency=12,cart=12,checkout=24,support=6,offtopic=5,injection=3"
+DEFAULT_MIX = "browse=28,compare=10,currency=12,cart=12,checkout=12,support=6,offtopic=5,injection=3"
 
 
 def _scenario_weights():

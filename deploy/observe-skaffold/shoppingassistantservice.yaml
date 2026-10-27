@@ -56,6 +56,18 @@ spec:
             path: /healthz
             port: 8080
         env:
+        - name: ACCOUNT_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: shopping-assistant-account-api
+              key: ACCOUNT_API_SECRET
+        - name: ACCOUNTS_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: accounts-db-credentials
+              key: ACCOUNTS_DATABASE_URL
+              # optional: the pod must still start (guest shopping works) if the Secret is absent
+              optional: true
         - name: OTEL_SERVICE_NAME
           value: shoppingassistantservice
         - name: K8S_POD_NAME

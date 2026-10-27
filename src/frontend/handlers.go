@@ -16,6 +16,8 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -246,7 +248,7 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to add to cart"), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("location", baseUrl + "/cart")
+	w.Header().Set("location", baseUrl+"/cart")
 	w.WriteHeader(http.StatusFound)
 }
 
@@ -261,7 +263,7 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to empty cart"), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("location", baseUrl + "/")
+	w.Header().Set("location", baseUrl+"/")
 	w.WriteHeader(http.StatusFound)
 }
 
@@ -460,15 +462,237 @@ func (fe *frontendServer) assistantHandler(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+func (fe *frontendServer) accountActivationHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		fe.accountSubmit(w, r, "activation")
+		return
+	}
+	fe.renderAccountForm(w, r, "Complete Account Setup", "activation")
+}
+
+func (fe *frontendServer) accountCreateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		fe.accountSubmit(w, r, "create")
+		return
+	}
+	fe.renderAccountForm(w, r, "Create Account", "create")
+}
+
+func (fe *frontendServer) loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		fe.accountSubmit(w, r, "login")
+		return
+	}
+	fe.renderAccountForm(w, r, "Log In", "login")
+}
+
+func (fe *frontendServer) accountProfileHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		fe.accountSubmit(w, r, "profile")
+		return
+	}
+	csrf, _ := r.Cookie(cookieCSRF)
+	if csrf == nil {
+		value := make([]byte, 24)
+		_, _ = cryptorand.Read(value)
+		csrf = &http.Cookie{Name: cookieCSRF, Value: base64.RawURLEncoding.EncodeToString(value), Path: "/", MaxAge: cookieMaxAge, HttpOnly: true, SameSite: http.SameSiteLaxMode}
+		http.SetCookie(w, csrf)
+	}
+	profile, status, err := fe.accountAPIGet(r, "/account/profile")
+	if err != nil || status >= http.StatusInternalServerError {
+		// Keep the auth cookie: the customer is still logged in, only their saved details are unavailable.
+		renderAccountTemplate(w, r, "My Account", "unavailable", csrf.Value, nil, "Your saved account details are temporarily unavailable. Please try again shortly.")
+		return
+	}
+	if status >= 400 {
+		http.Redirect(w, r, baseUrl+"/login", http.StatusFound)
+		return
+	}
+	_ = templates.ExecuteTemplate(w, "account", injectCommonTemplateData(r, map[string]interface{}{"title": "My Account", "mode": "profile", "csrf": csrf.Value, "account": profile["account"]}))
+}
+
+func (fe *frontendServer) accountSubmit(w http.ResponseWriter, r *http.Request, mode string) {
+	payload := map[string]interface{}{}
+	for _, key := range []string{"first_name", "last_name", "email", "password", "street_address", "city", "state", "zip_code", "country", "preferred_currency"} {
+		payload[key] = strings.TrimSpace(r.FormValue(key))
+	}
+	if csrf, _ := r.Cookie(cookieCSRF); csrf == nil || csrf.Value != r.FormValue("csrf") {
+		http.Error(w, "invalid request", http.StatusForbidden)
+		return
+	}
+	if mode == "profile" {
+		payload["session_token"] = cookieValue(r, cookieAuth)
+		payload["address"] = map[string]interface{}{"street_address": payload["street_address"], "city": payload["city"], "state": payload["state"], "zip_code": payload["zip_code"], "country": payload["country"]}
+	}
+	path := map[string]string{"create": "/account/register", "login": "/account/login", "profile": "/account/profile", "activation": "/account/claim"}[mode]
+	if mode == "activation" {
+		// The activation code never reaches the browser: the assistant resolves it server-side
+		// from this anonymous session id.
+		payload["session_id"] = sessionID(r)
+		clearActivationCookies(w)
+	}
+	result, status, err := fe.accountAPI(r, path, payload)
+	if err != nil || status >= 400 {
+		csrf, _ := r.Cookie(cookieCSRF)
+		values := map[string]string{}
+		for _, key := range []string{"first_name", "last_name", "email", "street_address", "city", "state", "zip_code", "country", "preferred_currency"} {
+			values[key] = r.FormValue(key)
+		}
+		titles := map[string]string{"create": "Create Account", "login": "Log In", "profile": "My Account", "activation": "Complete Account Setup"}
+		renderAccountTemplate(w, r, titles[mode], mode, csrf.Value, values, accountErrorMessage(result, status, err))
+		return
+	}
+	if token, ok := result["session_token"].(string); ok && token != "" {
+		http.SetCookie(w, &http.Cookie{Name: cookieAuth, Value: token, Path: "/", MaxAge: cookieMaxAge, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	} else if login, _ := result["login_required"].(bool); login {
+		w.Header().Set("Location", baseUrl+"/login?notice=account_ready")
+		w.WriteHeader(http.StatusFound)
+		return
+	}
+	w.Header().Set("Location", baseUrl+"/account/profile")
+	w.WriteHeader(http.StatusFound)
+}
+
+func cookieValue(r *http.Request, name string) string {
+	c, _ := r.Cookie(name)
+	if c == nil {
+		return ""
+	}
+	return c.Value
+}
+
+func (fe *frontendServer) renderAccountForm(w http.ResponseWriter, r *http.Request, title, mode string) {
+	csrf, _ := r.Cookie(cookieCSRF)
+	if csrf == nil {
+		value := make([]byte, 24)
+		_, _ = cryptorand.Read(value)
+		csrf = &http.Cookie{Name: cookieCSRF, Value: base64.RawURLEncoding.EncodeToString(value), Path: "/", MaxAge: cookieMaxAge, HttpOnly: true, SameSite: http.SameSiteLaxMode}
+		http.SetCookie(w, csrf)
+	}
+	if mode == "activation" {
+		clearActivationCookies(w) // leftovers from builds that stored the code in the browser
+		activation, status, activationErr := fe.accountAPIGet(r, "/account/activation")
+		if status == http.StatusNotFound {
+			renderAccountTemplate(w, r, title, mode, csrf.Value, nil, "There is no account setup in progress for this browser.")
+			return
+		}
+		if activationErr != nil || status >= 400 {
+			renderAccountTemplate(w, r, title, mode, csrf.Value, nil, "Account setup is temporarily unavailable. Please try again.")
+			return
+		}
+		email, _ := activation["email"].(string)
+		renderAccountTemplate(w, r, title, mode, csrf.Value, map[string]string{"email": email}, "")
+		return
+	}
+	notice := ""
+	if mode == "login" && r.URL.Query().Get("notice") == "account_ready" {
+		notice = "Your account is ready - please log in."
+	}
+	renderAccountTemplate(w, r, title, mode, csrf.Value, nil, notice)
+}
+
+func clearActivationCookies(w http.ResponseWriter) {
+	for _, name := range []string{"shop_activation_email", "shop_activation_code"} {
+		http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	}
+}
+
+func renderAccountTemplate(w http.ResponseWriter, r *http.Request, title, mode, csrf string, values map[string]string, accountError string) {
+	if values == nil {
+		values = map[string]string{}
+	}
+	_ = templates.ExecuteTemplate(w, "account", injectCommonTemplateData(r, map[string]interface{}{
+		"title": title, "mode": mode, "csrf": csrf, "account_values": values, "account_error": accountError,
+	}))
+}
+
+func accountErrorMessage(result map[string]interface{}, status int, err error) string {
+	if err != nil || status >= http.StatusInternalServerError {
+		return "The account service is temporarily unavailable. Please try again."
+	}
+	switch status {
+	case http.StatusConflict:
+		return "An account with that email already exists. Try logging in instead."
+	case http.StatusUnauthorized:
+		return "The email or password is incorrect."
+	case http.StatusTooManyRequests:
+		return "Too many login attempts. Please try again later."
+	case http.StatusBadRequest:
+		if result != nil {
+			if message, ok := result["error"].(string); ok && message == "validation_failed" {
+				if fields, ok := result["fields"].(map[string]interface{}); ok && len(fields) > 0 {
+					order := []string{"first_name", "last_name", "email", "password", "confirm_password", "street_address", "city", "state", "zip_code", "country", "preferred_currency"}
+					var msgs []string
+					for _, key := range order {
+						if m, ok := fields[key].(string); ok && m != "" {
+							msgs = append(msgs, m)
+						}
+					}
+					if len(msgs) > 0 {
+						return strings.Join(msgs, " ")
+					}
+				}
+				return "Please check the account details and try again."
+			}
+		}
+	}
+	return "The account request could not be completed. Please try again."
+}
+
+func (fe *frontendServer) accountAPIGet(r *http.Request, path string) (map[string]interface{}, int, error) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://"+fe.shoppingAssistantSvcAddr+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("X-Account-Api-Secret", fe.accountAPISecret)
+	req.Header.Set("X-Session-ID", sessionID(r))
+	if auth := cookieValue(r, cookieAuth); auth != "" {
+		req.Header.Set("X-Account-Session", auth)
+	}
+	res, err := assistantClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	var out map[string]interface{}
+	err = json.NewDecoder(res.Body).Decode(&out)
+	return out, res.StatusCode, err
+}
+
+func (fe *frontendServer) accountAPI(r *http.Request, path string, payload map[string]interface{}) (map[string]interface{}, int, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, err
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://"+fe.shoppingAssistantSvcAddr+path, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Account-Api-Secret", fe.accountAPISecret)
+	req.Header.Set("X-Session-ID", sessionID(r))
+	if auth := cookieValue(r, cookieAuth); auth != "" {
+		req.Header.Set("X-Account-Session", auth)
+	}
+	res, err := assistantClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	var out map[string]interface{}
+	err = json.NewDecoder(res.Body).Decode(&out)
+	return out, res.StatusCode, err
+}
+
 func (fe *frontendServer) logoutHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("logging out")
-	for _, c := range r.Cookies() {
-		c.Expires = time.Now().Add(-time.Hour * 24 * 365)
-		c.MaxAge = -1
-		http.SetCookie(w, c)
+	if c, err := r.Cookie(cookieAuth); err == nil {
+		_, _, _ = fe.accountAPI(r, "/account/logout", nil)
+		http.SetCookie(w, &http.Cookie{Name: c.Name, Value: "", Path: "/", Expires: time.Now().Add(-time.Hour * 24 * 365),
+			MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	}
-	w.Header().Set("Location", baseUrl + "/")
+	w.Header().Set("Location", baseUrl+"/")
 	w.WriteHeader(http.StatusFound)
 }
 
@@ -502,16 +726,27 @@ var assistantClient = &http.Client{
 
 func (fe *frontendServer) chatBotHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
+	type CheckoutInfo struct {
+		Stage         string   `json:"stage"`
+		NextStep      string   `json:"next_step"`
+		Missing       []string `json:"missing"`
+		CheckoutID    string   `json:"checkout_id"`
+		Customer      string   `json:"customer_type"`
+		CompleteSetup bool     `json:"complete_setup"`
+	}
 	type Response struct {
-		Message string `json:"message"`
-		TraceID string `json:"trace_id,omitempty"`
-		Outcome string `json:"outcome,omitempty"`
+		Message       string        `json:"message"`
+		TraceID       string        `json:"trace_id,omitempty"`
+		Outcome       string        `json:"outcome,omitempty"`
+		Checkout      *CheckoutInfo `json:"checkout,omitempty"`
+		CompleteSetup bool          `json:"complete_setup,omitempty"`
 	}
 
 	type LLMResponse struct {
-		Content string `json:"content"`
-		TraceID string `json:"trace_id"`
-		Details struct {
+		Content  string        `json:"content"`
+		TraceID  string        `json:"trace_id"`
+		Checkout *CheckoutInfo `json:"checkout"`
+		Details  struct {
 			Outcome string `json:"outcome"`
 		} `json:"details"`
 	}
@@ -527,6 +762,9 @@ func (fe *frontendServer) chatBotHandler(w http.ResponseWriter, r *http.Request)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Session-ID", sessionID(r))
+	if auth := cookieValue(r, cookieAuth); auth != "" {
+		req.Header.Set("X-Account-Session", auth)
+	}
 	for _, h := range []string{"X-Prompt-Category", "X-Conversation-ID"} {
 		if v := r.Header.Get(h); v != "" {
 			req.Header.Set(h, v)
@@ -558,7 +796,7 @@ func (fe *frontendServer) chatBotHandler(w http.ResponseWriter, r *http.Request)
 
 	// The UI only reads "message"; trace_id/outcome let callers (load generator,
 	// support) jump straight to the agent trace.
-	json.NewEncoder(w).Encode(Response{Message: response.Content, TraceID: response.TraceID, Outcome: response.Details.Outcome})
+	json.NewEncoder(w).Encode(Response{Message: response.Content, TraceID: response.TraceID, Outcome: response.Details.Outcome, Checkout: response.Checkout, CompleteSetup: response.Checkout != nil && response.Checkout.CompleteSetup})
 }
 
 func (fe *frontendServer) setCurrencyHandler(w http.ResponseWriter, r *http.Request) {

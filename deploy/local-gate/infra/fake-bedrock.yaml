@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-bedrock
+  namespace: online-boutique
+  labels:
+    app: fake-bedrock
+    local-gate: ob-gate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-bedrock
+  template:
+    metadata:
+      labels:
+        app: fake-bedrock
+    spec:
+      containers:
+      - name: fake-bedrock
+        image: localhost:5001/ob-gate/fake-bedrock:local
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          tcpSocket: {port: http}
+          periodSeconds: 5
+        resources:
+          requests: {cpu: 20m, memory: 64Mi}
+          limits: {cpu: 100m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-bedrock
+  namespace: online-boutique
+  labels:
+    app: fake-bedrock
+    local-gate: ob-gate
+spec:
+  selector:
+    app: fake-bedrock
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

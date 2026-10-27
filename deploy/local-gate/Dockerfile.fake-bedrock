@@ -1,0 +1,7 @@
+FROM shoppingassistantservice:local-pgcheck
+COPY src/shoppingassistantservice/tests/fakes.py /app/fakes.py
+COPY src/shoppingassistantservice/demo_pb2.py /app/demo_pb2.py
+COPY src/shoppingassistantservice/demo_pb2_grpc.py /app/demo_pb2_grpc.py
+COPY deploy/local-gate/fake-bedrock-server.py /app/fake-bedrock-server.py
+EXPOSE 8080
+ENTRYPOINT ["python", "/app/fake-bedrock-server.py"]

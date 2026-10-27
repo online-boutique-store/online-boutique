@@ -30,7 +30,7 @@
         <div id="chat-modal" class="chat-modal">
           <div id="bot-messages" class="bot-messages">
             <p class="bot-message">
-              <span class="bot-message-text">Hi, I'm the Cymbal Shops assistant. I can help you with your shopping experience.</span>
+              <span class="bot-message-text">Hi, I'm your AI Personal Shopping Assistant. I can help you with your shopping experience.</span>
             </p>
             <p class="bot-message">
               <span class="bot-message-text">What can I help you with?</span>
@@ -150,7 +150,8 @@
 
     // Replace the placeholder bot message text with the real response
     // Making sure to remove any lists or product IDs from that message
-    botMessageSpan.innerText = responseJson.message.replace(/\n+[-*\d][\S\s]*/g, "");
+    botMessageSpan.style.whiteSpace = "pre-line";
+    botMessageSpan.innerText = responseJson.message.replace(/\*\*(.+?)\*\*/g, "$1").trim();
     botMessage.classList.remove("bot-message-loading");
 
     // If there are any product IDs...

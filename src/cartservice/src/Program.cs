@@ -15,6 +15,7 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Console;
 using cartservice;
 
 CreateHostBuilder(args).Build().Run();
@@ -37,7 +38,13 @@ static IHostBuilder CreateHostBuilder(string[] args) =>
             }
             else
             {
-                logging.AddConsole();
+                // Stamp trace_id/span_id (from the ambient Activity.Current)
+                // onto every stdout log line via CorrelatedJsonConsoleFormatter
+                // -- this is what actually reaches Observe today, since
+                // OTEL_LOGS_EXPORTER=none in every current deployment makes
+                // the AddOpenTelemetry() branch above a no-op.
+                logging.AddConsole(options => options.FormatterName = CorrelatedJsonConsoleFormatter.FormatterName)
+                    .AddConsoleFormatter<CorrelatedJsonConsoleFormatter, ConsoleFormatterOptions>();
             }
         })
         .ConfigureWebHostDefaults(webBuilder =>

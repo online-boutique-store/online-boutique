@@ -1,0 +1,215 @@
+# In-cluster PostgreSQL for customer accounts (source of truth), plus a metrics exporter.
+# WRITTEN BUT NOT APPLIED. Deliberately NOT part of deploy/observe-skaffold (so `skaffold run`
+# can never create it by accident); apply it separately: kubectl apply -n <ns> -f this file. Applying requires explicit approval (see docs/ai-demo.md, "Customer
+# accounts on Postgres" - rollout steps).
+#
+# Prerequisites (created out of band by deploy/observe/create-account-secrets.sh):
+#   Secret accounts-db-credentials with keys
+#     POSTGRES_PASSWORD, APP_DB_PASSWORD, EXPORTER_DB_PASSWORD   (consumed by this StatefulSet)
+#     ACCOUNTS_DATABASE_URL                                      (consumed by shoppingassistantservice)
+#
+# Before the first apply, resolve and record these (see the precheck in docs/ai-demo.md):
+#   - Pin `image: postgres:16.x` by digest (the digest cannot be resolved offline).
+#   - Confirm the StorageClass exists and its reclaim policy (redis-cart uses gp2).
+#   - Confirm the CNI enforces NetworkPolicy; otherwise the policy below is documentation only.
+#
+# Not highly available: one replica, one PVC. Pods rescheduling = brief outage; the app degrades
+# (guests keep shopping, logged-in customers keep their identity) and recovers on its own.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: accounts-db-init
+  labels:
+    app: accounts-db
+data:
+  # Runs only on an EMPTY data directory (first start). Creates least-privilege roles.
+  10-roles.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<SQL
+    CREATE ROLE boutique_app LOGIN PASSWORD '${APP_DB_PASSWORD}';
+    CREATE ROLE exporter LOGIN PASSWORD '${EXPORTER_DB_PASSWORD}';
+    GRANT pg_monitor TO exporter;
+    CREATE DATABASE accounts OWNER boutique_app;
+    REVOKE ALL ON DATABASE accounts FROM PUBLIC;
+    GRANT CONNECT ON DATABASE accounts TO exporter;
+    SQL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: accounts-db
+  labels:
+    app: accounts-db
+spec:
+  clusterIP: None
+  selector:
+    app: accounts-db
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: accounts-db-metrics
+  labels:
+    app: accounts-db
+  # Used by the optional annotation-based scrape (deploy/observe/values-accounts-db-metrics.yaml).
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9187"
+    prometheus.io/path: /metrics
+spec:
+  selector:
+    app: accounts-db
+  ports:
+  - name: metrics
+    port: 9187
+    targetPort: metrics
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: accounts-db
+  labels:
+    app: accounts-db
+spec:
+  serviceName: accounts-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: accounts-db
+  template:
+    metadata:
+      labels:
+        app: accounts-db
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        runAsUser: 999
+      containers:
+      - name: postgres
+        image: postgres:16.4   # PIN BY DIGEST before first apply
+        args:
+        - -c
+        - log_min_duration_statement=200
+        - -c
+        - log_lock_waits=on
+        - -c
+        - log_connections=on
+        - -c
+        - log_disconnections=on
+        - -c
+        - "log_line_prefix=%m [%p] %e %u@%d "
+        - -c
+        - password_encryption=scram-sha-256
+        env:
+        - name: POSTGRES_USER
+          value: postgres
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_PASSWORD
+          valueFrom: {secretKeyRef: {name: accounts-db-credentials, key: POSTGRES_PASSWORD}}
+        - name: APP_DB_PASSWORD
+          valueFrom: {secretKeyRef: {name: accounts-db-credentials, key: APP_DB_PASSWORD}}
+        - name: EXPORTER_DB_PASSWORD
+          valueFrom: {secretKeyRef: {name: accounts-db-credentials, key: EXPORTER_DB_PASSWORD}}
+        ports:
+        - name: postgres
+          containerPort: 5432
+        readinessProbe:
+          exec: {command: ["pg_isready", "-U", "postgres", "-h", "127.0.0.1"]}
+          periodSeconds: 5
+        livenessProbe:
+          exec: {command: ["pg_isready", "-U", "postgres", "-h", "127.0.0.1"]}
+          periodSeconds: 10
+          failureThreshold: 6
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          privileged: false
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/postgresql/data}
+        - {name: run, mountPath: /var/run/postgresql}
+        - {name: tmp, mountPath: /tmp}
+        - {name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true}
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: 500m, memory: 512Mi}
+      - name: exporter
+        image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0   # PIN BY DIGEST before first apply
+        env:
+        - name: DATA_SOURCE_URI
+          value: "127.0.0.1:5432/accounts?sslmode=disable"
+        - name: DATA_SOURCE_USER
+          value: exporter
+        - name: DATA_SOURCE_PASS
+          valueFrom: {secretKeyRef: {name: accounts-db-credentials, key: EXPORTER_DB_PASSWORD}}
+        ports:
+        - name: metrics
+          containerPort: 9187
+        readinessProbe:
+          httpGet: {path: /, port: metrics}
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          privileged: false
+          readOnlyRootFilesystem: true
+          runAsUser: 65534
+        resources:
+          requests: {cpu: 20m, memory: 32Mi}
+          limits: {cpu: 100m, memory: 64Mi}
+      volumes:
+      - name: run
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      - name: init
+        configMap:
+          name: accounts-db-init
+          defaultMode: 0555
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app: accounts-db
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: gp2   # verify in the precheck; prefer a class with reclaimPolicy Retain
+      resources:
+        requests:
+          storage: 5Gi
+---
+# Only the assistant may reach Postgres; only the Observe agent namespaces may scrape the exporter.
+# Effective only if the cluster CNI enforces NetworkPolicy (verify in the precheck).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: accounts-db
+spec:
+  podSelector:
+    matchLabels:
+      app: accounts-db
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: shoppingassistantservice
+    ports:
+    - {protocol: TCP, port: 5432}
+  - from:
+    - namespaceSelector:
+        matchExpressions:
+        - {key: kubernetes.io/metadata.name, operator: In, values: [observe, observe-demo]}
+    ports:
+    - {protocol: TCP, port: 9187}

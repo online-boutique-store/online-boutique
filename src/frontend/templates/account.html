@@ -1,0 +1,55 @@
+{{ define "account" }}
+{{ template "header" . }}
+<main class="container py-5">
+  <h1>{{ .title }}</h1>
+  {{ if .account_error }}
+  <p class="account-error" role="alert">{{ .account_error }}</p>
+  {{ end }}
+  {{ if eq .mode "create" }}
+  <form method="post" action="{{ .baseUrl }}/account/create">
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    <label>First name <input name="first_name" value="{{ index .account_values "first_name" }}" autocomplete="given-name" required></label>
+    <label>Last name <input name="last_name" value="{{ index .account_values "last_name" }}" autocomplete="family-name" required></label>
+    <label>Email <input type="email" name="email" pattern="[A-Za-z0-9._%+'\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}" title="Enter a full email address ending in .com, .edu, .org, etc." value="{{ index .account_values "email" }}" required></label>
+    <label>Street address <input name="street_address" value="{{ index .account_values "street_address" }}" required></label>
+    <label>City <input name="city" value="{{ index .account_values "city" }}" required></label>
+    <label>State or region <input name="state" value="{{ index .account_values "state" }}" required></label>
+    <label>Postal code <input name="zip_code" value="{{ index .account_values "zip_code" }}" required></label>
+    <label>Country <input name="country" value="{{ index .account_values "country" }}" required></label>
+    <label>Password <input type="password" name="password" minlength="8" required></label>
+    <button type="submit">Create account</button>
+  </form>
+  {{ else if eq .mode "login" }}
+  <form method="post" action="{{ .baseUrl }}/login">
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    <label>Email <input type="email" name="email" pattern="[A-Za-z0-9._%+'\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}" title="Enter a full email address ending in .com, .edu, .org, etc." value="{{ index .account_values "email" }}" required></label>
+    <label>Password <input type="password" name="password" required></label>
+    <button type="submit">Log in</button>
+  </form>
+  {{ else if eq .mode "activation" }}
+  <p>Use this page to finish activating the synthetic demo account created in the assistant.</p>
+  {{ if index .account_values "email" }}<p>Account: <strong>{{ index .account_values "email" }}</strong></p>{{ end }}
+  <form method="post" action="{{ .baseUrl }}/account/activation">
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    <label>Password <input type="password" name="password" minlength="8" required></label>
+    <button type="submit">Complete account setup</button>
+  </form>
+  {{ else if eq .mode "unavailable" }}
+  <p>You are still logged in. <a href="{{ .baseUrl }}/">Continue shopping</a> or try again in a moment.</p>
+  {{ else }}
+  <form method="post" action="{{ .baseUrl }}/account/profile">
+    <input type="hidden" name="csrf" value="{{ .csrf }}">
+    <label>First name <input name="first_name" value="{{ index .account "first_name" }}" autocomplete="given-name" required></label>
+    <label>Last name <input name="last_name" value="{{ index .account "last_name" }}" autocomplete="family-name" required></label>
+    <label>Street address <input name="street_address"></label>
+    <label>City <input name="city"></label>
+    <label>State or region <input name="state"></label>
+    <label>Postal code <input name="zip_code"></label>
+    <label>Country <input name="country"></label>
+    <label>Preferred currency <input name="preferred_currency" value="{{ index .account "preferred_currency" }}"></label>
+    <button type="submit">Save profile</button>
+  </form>
+  {{ end }}
+</main>
+{{ template "footer" . }}
+{{ end }}

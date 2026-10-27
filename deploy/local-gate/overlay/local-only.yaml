@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shoppingassistantservice
+  namespace: online-boutique
+spec:
+  template:
+    spec:
+      containers:
+      - name: server
+        env:
+        - name: BEDROCK_ENDPOINT_URL
+          value: http://fake-bedrock.online-boutique.svc.cluster.local:8080
+        - name: AWS_ACCESS_KEY_ID
+          value: testing
+        - name: AWS_SECRET_ACCESS_KEY
+          value: testing
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgenerator
+  namespace: online-boutique
+spec:
+  replicas: 0

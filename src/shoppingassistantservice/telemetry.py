@@ -6,9 +6,11 @@ forwarder, W3C tracecontext+baggage, app.* attributes stamped from baggage).
 import json
 import logging
 import os
+import re
 import sys
 import time
 
+import telemetry_sanitize as _san
 from opentelemetry import baggage, context, metrics, trace
 from opentelemetry.propagate import set_global_textmap
 from opentelemetry.propagators.composite import CompositePropagator
@@ -49,6 +51,39 @@ checkout_recovered_value = _meter.create_counter(
     "ai.checkout.recovered_value_usd", unit="USD",
     description="USD value of orders that succeeded after an earlier failure in the same session. "
                 "lost_revenue = failed value - recovered value.")
+checkout_funnel_stage = _meter.create_counter(
+    "ai.checkout.funnel.stage",
+    description="Unique checkout flows reaching a funnel stage. Counted ONCE per flow per stage "
+                "(repeats and retries do not inflate it). prefilled=true when a returning "
+                "customer's saved data satisfied the stage.")
+checkout_terminal = _meter.create_counter(
+    "ai.checkout.terminal",
+    description="Terminal outcome per checkout attempt: completed | failed | abandoned. "
+                "Exactly one per attempt.")
+account_lookups = _meter.create_counter(
+    "ai.account.lookups", description="Account lookups by outcome (found | not_found | error)")
+account_creations = _meter.create_counter(
+    "ai.account.creations", description="Account creations by outcome (created | exists | error)")
+account_web_operations = _meter.create_counter(
+    "app.account.operations",
+    description="Website account operations (register | login | logout | profile_update) by outcome "
+                "(success | validation_failed | exists | invalid_credentials | locked | unauthorized)")
+currency_selections = _meter.create_counter(
+    "ai.checkout.currency_selections",
+    description="Currency values chosen by the model for checkout; currency.valid=false means the "
+                "value is not an ISO code the currency service accepts.")
+account_db_duration = _meter.create_histogram(
+    "app.account.db.duration", unit="s", description="Accounts database operation latency by operation and outcome")
+account_pending_reaped = _meter.create_counter(
+    "app.account.pending_reaped", description="Abandoned pending accounts deleted by the reaper")
+account_activation_events = _meter.create_counter(
+    "app.account.activation.events", description="Activation lifecycle events by outcome")
+request_duration = _meter.create_histogram(
+    "ai.assistant.request.duration", unit="s", description="End-to-end agent time per customer prompt")
+llm_call_duration = _meter.create_histogram(
+    "ai.llm.call.duration", unit="s", description="Bedrock Converse call latency")
+tool_duration = _meter.create_histogram(
+    "ai.tool.duration", unit="s", description="Agent tool execution time")
 
 
 # --- setup -------------------------------------------------------------------
@@ -90,7 +125,8 @@ def init(flask_app):
 
         ep, res = _endpoint(), _resource()
         tp = TracerProvider(resource=res)
-        tp.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=ep, insecure=True)))
+        tp.add_span_processor(BatchSpanProcessor(
+            _san.make_span_exporter(OTLPSpanExporter(endpoint=ep, insecure=True))))
         trace.set_tracer_provider(tp)
         if os.environ.get("OTEL_METRICS_EXPORTER", "otlp") == "otlp":
             reader = PeriodicExportingMetricReader(
@@ -103,6 +139,8 @@ def init(flask_app):
             from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 
             lp = LoggerProvider(resource=res)
+            # Sanitizer first: it mutates the record before the batch processor queues it.
+            lp.add_log_record_processor(_san.make_log_processor())
             lp.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter(endpoint=ep, insecure=True)))
             set_logger_provider(lp)
 
@@ -113,9 +151,17 @@ def init(flask_app):
     from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
     from opentelemetry.instrumentation.flask import FlaskInstrumentor
     from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
+    from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
 
     FlaskInstrumentor().instrument_app(flask_app, excluded_urls="healthz")
     GrpcInstrumentorClient().instrument()
+    # No sqlcommenter and no parameter capture: SQL spans carry placeholders only.
+    PsycopgInstrumentor().instrument()
+    try:  # Redis client spans for account reads/writes (child of the execute_tool span)
+        from opentelemetry.instrumentation.redis import RedisInstrumentor
+        RedisInstrumentor().instrument()
+    except ImportError:
+        pass
     # Botocore instruments Bedrock Converse as a `chat <model>` span with model +
     # token usage. It only emits prompt/response content as gen_ai.* LOG events
     # (when OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true), never as span
@@ -151,9 +197,56 @@ def _parts(blocks):
     return out
 
 
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def redact(s):
+    """Preserve synthetic identity and regression evidence while excluding shipping/secrets."""
+    try:
+        return _san.sanitize_text(s)
+    except Exception:
+        return _san.CONTENT_PLACEHOLDER
+
+
 def _json_attr(value):
-    s = json.dumps(value, default=str)
+    s = redact(json.dumps(value, default=str))
     return s if len(s) <= _MAX_MSG_ATTR else s[:_MAX_MSG_ATTR] + "...[truncated]"
+
+
+def _message_text(message):
+    parts = []
+    for part in message.get("parts") or []:
+        if part.get("type") == "text":
+            parts.append(str(part.get("content") or ""))
+        else:
+            parts.append(json.dumps(part, default=str))
+    return "\n".join(part for part in parts if part)
+
+
+def _set_legacy_message_attributes(span, prefix, messages):
+    for index, message in enumerate(messages):
+        content = _message_text(message)
+        if not content:
+            continue
+        span.set_attribute(f"{prefix}.{index}.role", str(message.get("role") or ""))
+        span.set_attribute(f"{prefix}.{index}.content", redact(content)[:_MAX_MSG_ATTR])
+
+
+def set_message_attributes(span, input_messages=None, output_messages=None, system_instructions=None):
+    """Write both modern message arrays and Observe's indexed text attributes.
+
+    system_instructions (a list of semconv parts) goes in gen_ai.system_instructions,
+    never in input_messages, so index 0 of the inputs is a conversation turn."""
+    if not (_content_enabled() and span.is_recording()):
+        return
+    if system_instructions:
+        span.set_attribute("gen_ai.system_instructions", _json_attr(system_instructions))
+    if input_messages is not None:
+        span.set_attribute("gen_ai.input.messages", _json_attr(input_messages))
+        _set_legacy_message_attributes(span, "gen_ai.prompt", input_messages)
+    if output_messages is not None:
+        span.set_attribute("gen_ai.output.messages", _json_attr(output_messages))
+        _set_legacy_message_attributes(span, "gen_ai.completion", output_messages)
 
 
 def _is_converse(service_name, operation_name):
@@ -165,27 +258,48 @@ def _bedrock_request_hook(span, service_name, operation_name, api_params):
         return
     span.set_attribute("gen_ai.provider.name", "aws.bedrock")
     # Observe classifies LLM spans by these Traceloop/OpenLLMetry attributes.
-    span.set_attribute("traceloop.span.kind", "task")
+    span.set_attribute("traceloop.span.kind", "chat")
     span.set_attribute("llm.request.type", "chat")
+    span.set_attribute("gen_ai.operation.name", "chat")
+    stamp_app_attrs(span)
     model_id = api_params.get("modelId", "")
+    span.set_attribute("gen_ai.request.model", model_id)
     span.set_attribute("llm.request.model", model_id)
+    tools = (api_params.get("toolConfig") or {}).get("tools") or []
+    defs = [{"name": t["toolSpec"].get("name"), "description": t["toolSpec"].get("description"),
+             "parameters": (t["toolSpec"].get("inputSchema") or {}).get("json")}
+            for t in tools if "toolSpec" in t]
+    if defs:
+        span.set_attribute("gen_ai.tool.definitions", json.dumps(defs, default=str))
     if not _content_enabled():
         return
-    msgs = [{"role": "system", "parts": _parts(api_params.get("system"))}] if api_params.get("system") else []
-    msgs += [{"role": m.get("role"), "parts": _parts(m.get("content"))} for m in api_params.get("messages", [])]
-    span.set_attribute("gen_ai.input.messages", _json_attr(msgs))
+    msgs = [{"role": m.get("role"), "parts": _parts(m.get("content"))} for m in api_params.get("messages", [])]
+    set_message_attributes(span, input_messages=msgs,
+                           system_instructions=_parts(api_params.get("system")) or None)
 
 
 def _bedrock_response_hook(span, service_name, operation_name, result):
     if not (_is_converse(service_name, operation_name) and span.is_recording()):
         return
+    # The Converse response carries no modelId, so fall back to the request model.
+    req_model = (getattr(span, "attributes", None) or {}).get("gen_ai.request.model", "")
+    model = (result or {}).get("modelId") or req_model
+    if model:
+        span.set_attribute("gen_ai.response.model", model)
+        span.set_attribute("llm.response.model", model)
+    usage = (result or {}).get("usage") or {}
+    if usage:
+        in_tok, out_tok = usage.get("inputTokens", 0), usage.get("outputTokens", 0)
+        span.set_attribute("gen_ai.usage.input_tokens", in_tok)
+        span.set_attribute("gen_ai.usage.output_tokens", out_tok)
+        span.set_attribute("llm.usage.total_tokens", usage.get("totalTokens", in_tok + out_tok))
     if not _content_enabled():
         return
     msg = (result or {}).get("output", {}).get("message") or {}
-    span.set_attribute("llm.response.model", (result or {}).get("modelId", ""))
-    span.set_attribute("gen_ai.output.messages", _json_attr(
-        [{"role": msg.get("role", "assistant"), "parts": _parts(msg.get("content")),
-          "finish_reason": (result or {}).get("stopReason")}]))
+    set_message_attributes(span, output_messages=[
+        {"role": msg.get("role", "assistant"), "parts": _parts(msg.get("content")),
+         "finish_reason": (result or {}).get("stopReason")}
+    ])
 
 
 # --- structured logging with trace correlation -------------------------------
@@ -258,6 +372,16 @@ def stamp_app_attrs(span=None):
     for key, value in baggage.get_all().items():
         if key.startswith("app."):
             span.set_attribute(key, value)
+            # Observe's AI Agents > Conversation view groups by the standard gen_ai /
+            # user attributes, so mirror our app.* identity onto every span in the turn.
+            for std_key in _STANDARD_MIRRORS.get(key, ()):
+                span.set_attribute(std_key, value)
+
+
+_STANDARD_MIRRORS = {
+    "app.conversation.id": ("gen_ai.conversation.id",),
+    "app.customer.id": ("user.id", "enduser.id"),
+}
 
 
 def attach_baggage(**entries):

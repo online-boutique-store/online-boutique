@@ -1,0 +1,77 @@
+# Helm values for the SECOND agent: release observe-agent-demo, ns observe-demo.
+# Collects node logs/metrics, cluster events/metrics and receives the personal
+# agent's forwarded app OTLP, then ships everything to the shared demo tenant
+# under deployment.environment=field-demo-ai-app.
+#
+# The staging ingest token is NOT here: it lives in Secret agent-credentials in
+# ns observe-demo. Namespace overrides are the ones required for a non-default
+# namespace; --version 0.94.2 is used because it fixes the hardcoded
+# ClusterRoleBinding name that would otherwise collide with the personal release.
+cluster:
+  name: online-boutique
+  namespaceOverride:
+    value: observe-demo
+  deploymentEnvironment:
+    name: field-demo-ai-app
+  events:
+    enabled: true
+  metrics:
+    enabled: true
+
+cluster-events:
+  namespaceOverride: observe-demo
+cluster-metrics:
+  namespaceOverride: observe-demo
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+prometheus-scraper:
+  namespaceOverride: observe-demo
+node-logs-metrics:
+  namespaceOverride: observe-demo
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+monitor:
+  namespaceOverride: observe-demo
+forwarder:
+  namespaceOverride: observe-demo
+  mode: deployment
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 150m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+observe:
+  collectionEndpoint:
+    value: https://190558161486.collect.observe-staging.com/
+  token:
+    create: false
+
+node:
+  enabled: true
+  containers:
+    logs:
+      enabled: true
+    metrics:
+      enabled: true
+  forwarder:
+    enabled: true
+    metrics:
+      outputFormat: otel
+
+application:
+  prometheusScrape:
+    enabled: false
+  REDMetrics:
+    enabled: true
+    onlyGenerateForAPMSpans: true

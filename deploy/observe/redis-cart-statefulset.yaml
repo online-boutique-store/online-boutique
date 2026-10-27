@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-cart
+  labels:
+    app: redis-cart
+spec:
+  serviceName: redis-cart
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-cart
+  template:
+    metadata:
+      labels:
+        app: redis-cart
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: redis
+        image: redis:alpine
+        args: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--dir", "/data"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          privileged: false
+          readOnlyRootFilesystem: true
+        ports:
+        - name: redis
+          containerPort: 6379
+        readinessProbe:
+          tcpSocket:
+            port: redis
+          periodSeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: redis
+          periodSeconds: 5
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 70m
+            memory: 200Mi
+          limits:
+            cpu: 125m
+            memory: 256Mi
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+      labels:
+        app: redis-cart
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: gp2
+      resources:
+        requests:
+          storage: 1Gi
