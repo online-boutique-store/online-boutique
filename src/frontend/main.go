@@ -211,10 +211,17 @@ func initStats(log logrus.FieldLogger) {
 
 func initTracing(log logrus.FieldLogger, ctx context.Context, svc *frontendServer) (*sdktrace.TracerProvider, error) {
 	mustMapEnv(&svc.collectorAddr, "COLLECTOR_SERVICE_ADDR")
-	mustConnGRPC(ctx, &svc.collectorConn, svc.collectorAddr)
+	// Plain (uninstrumented) connection so exporting spans is not itself traced.
+	dialCtx, cancel := context.WithTimeout(ctx, time.Second*3)
+	defer cancel()
+	exportConn, err := grpc.DialContext(dialCtx, svc.collectorAddr, grpc.WithInsecure())
+	if err != nil {
+		panic(errors.Wrapf(err, "grpc: failed to connect %s", svc.collectorAddr))
+	}
+	svc.collectorConn = exportConn
 	exporter, err := otlptracegrpc.New(
 		ctx,
-		otlptracegrpc.WithGRPCConn(svc.collectorConn))
+		otlptracegrpc.WithGRPCConn(exportConn))
 	if err != nil {
 		log.Warnf("warn: Failed to create trace exporter: %v", err)
 	}

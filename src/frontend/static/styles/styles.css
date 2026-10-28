@@ -675,3 +675,83 @@ the rules below could be extracted.
   width: 10px;
   height: 5px;
 }
+
+/* Header controls: tidy currency selector and account links. */
+
+header .navbar.sub-navbar .controls {
+  align-items: center;
+  gap: 28px;
+}
+
+header .navbar.sub-navbar .controls .h-controls {
+  align-items: center;
+  gap: 24px;
+}
+
+header .h-control {
+  margin-left: 0;
+}
+
+header .h-control .controls-form {
+  margin: 0;
+}
+
+header .h-control select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background: #fff;
+  color: #1f1f1f;
+  cursor: pointer;
+  width: 104px;
+  height: 36px;
+  padding: 0 30px 0 36px;
+  border: 1px solid #d6d3da;
+  border-radius: 18px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+header .h-control select:hover {
+  border-color: #570d2e;
+}
+
+header .h-control select:focus {
+  outline: 0;
+  border-color: #570d2e;
+  box-shadow: 0 0 0 3px rgba(87, 13, 46, 0.15);
+}
+
+header img.currency-icon,
+header span.currency-icon {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  transform: translateY(-50%);
+  font-size: 14px;
+  line-height: 16px;
+  color: #570d2e;
+  pointer-events: none;
+  z-index: 1;
+}
+
+header .icon.arrow {
+  right: 14px;
+  top: 50%;
+  margin-top: -2px;
+  pointer-events: none;
+}
+
+header .navbar.sub-navbar .h-controls a {
+  color: #3d3a43;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+header .navbar.sub-navbar .h-controls a:hover {
+  color: #570d2e;
+  text-decoration: none;
+}

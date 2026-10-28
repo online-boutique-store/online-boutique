@@ -210,11 +210,28 @@ def _add_db_peer(attrs):
     return attrs
 
 
+def _add_grpc_peer(attrs, kind):
+    """Python's gRPC client instrumentation records rpc.service but no peer, so
+    APM cannot name the callee and draws a blank node. Every hipstershop
+    service is deployed as the lower-cased proto service name."""
+    from opentelemetry.trace import SpanKind
+    svc = attrs.get("rpc.service")
+    if kind != SpanKind.CLIENT or attrs.get("rpc.system") != "grpc" or not svc:
+        return attrs
+    if attrs.get("server.address") or attrs.get("peer.service"):
+        return attrs
+    name = str(svc).rsplit(".", 1)[-1].lower()
+    attrs = dict(attrs)
+    attrs["server.address"] = name
+    attrs["peer.service"] = name
+    return attrs
+
+
 def _sanitize_span(span):
     from opentelemetry.sdk.trace import Event, ReadableSpan
     from opentelemetry.trace import Status
 
-    attrs = _add_db_peer(sanitize_attributes(span.attributes))
+    attrs = _add_grpc_peer(_add_db_peer(sanitize_attributes(span.attributes)), span.kind)
     events = [Event(e.name, sanitize_attributes(e.attributes), e.timestamp) for e in (span.events or ())]
     status = span.status
     if status is not None and status.description:

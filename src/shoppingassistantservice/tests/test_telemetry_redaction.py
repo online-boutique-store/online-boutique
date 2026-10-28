@@ -34,6 +34,19 @@ def test_telemetry_redaction_policy():
     assert "failed to convert JPY to USD" in redacted
 
 
+
+def test_grpc_client_spans_get_peer():
+    from opentelemetry.trace import SpanKind
+    from telemetry_sanitize import _add_grpc_peer
+    a = {"rpc.system": "grpc", "rpc.service": "hipstershop.CartService"}
+    assert _add_grpc_peer(a, SpanKind.CLIENT)["peer.service"] == "cartservice"
+    assert "peer.service" not in _add_grpc_peer(a, SpanKind.SERVER)
+    b = dict(a, **{"server.address": "x"})
+    assert _add_grpc_peer(b, SpanKind.CLIENT)["server.address"] == "x"
+    print("PASS test_grpc_client_spans_get_peer")
+
+
 if __name__ == "__main__":
     test_telemetry_redaction_policy()
     print("PASS test_telemetry_redaction_policy")
+    test_grpc_client_spans_get_peer()
