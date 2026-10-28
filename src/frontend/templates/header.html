@@ -78,14 +78,19 @@
                         </div>
                         {{ end }}
                         <div class="h-control">
-                            <span class="icon currency-icon"> {{ renderCurrencyLogo $.user_currency}}</span>
-                            <form method="POST" class="controls-form" action="{{ $.baseUrl }}/setCurrency" id="currency_form" >
-                                <select name="currency_code" onchange="document.getElementById('currency_form').submit();">
-                                        {{range $.currencies}}
-                                    <option value="{{.}}" {{if eq . $.user_currency}}selected="selected"{{end}}>{{.}}</option>
+                            <span class="icon currency-icon">{{ renderCurrencyLogo $.user_currency}}</span>
+                            <details class="currency-menu">
+                                <summary aria-label="Currency: {{ $.user_currency }}">
+                                    <span class="currency-value">{{ $.user_currency }}</span>
+                                </summary>
+                                <div class="currency-options" role="menu">
+                                    {{range $.currencies}}
+                                    <form method="POST" action="{{ $.baseUrl }}/setCurrency">
+                                        <button type="submit" name="currency_code" value="{{.}}" role="menuitem" {{if eq . $.user_currency}}aria-current="true"{{end}}>{{.}}</button>
+                                    </form>
                                     {{end}}
-                                </select>
-                            </form>
+                                </div>
+                            </details>
                             <img src="{{ $.baseUrl }}/static/icons/Hipster_DownArrow.svg" alt="" class="icon arrow" />
                         </div>
                     </div>
