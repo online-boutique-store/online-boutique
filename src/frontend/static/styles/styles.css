@@ -680,7 +680,7 @@ the rules below could be extracted.
 
 header .navbar.sub-navbar .controls {
   align-items: center;
-  gap: 28px;
+  gap: 24px;
 }
 
 header .navbar.sub-navbar .controls .h-controls {
@@ -693,7 +693,7 @@ header .h-control {
 }
 
 header .h-control .controls-form {
-  margin: 0;
+  margin: 0 0 0 -6px;
 }
 
 header .h-control select {
@@ -703,12 +703,12 @@ header .h-control select {
   background: #fff;
   color: #1f1f1f;
   cursor: pointer;
-  width: 104px;
-  height: 36px;
-  padding: 0 30px 0 36px;
+  width: 84px;
+  height: 32px;
+  padding: 0 24px 0 28px;
   border: 1px solid #d6d3da;
-  border-radius: 18px;
-  font-size: 14px;
+  border-radius: 16px;
+  font-size: 13px;
   font-weight: 500;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
@@ -726,20 +726,20 @@ header .h-control select:focus {
 header img.currency-icon,
 header span.currency-icon {
   position: absolute;
-  left: 14px;
+  left: 10px;
   top: 50%;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   transform: translateY(-50%);
-  font-size: 14px;
-  line-height: 16px;
+  font-size: 13px;
+  line-height: 14px;
   color: #570d2e;
   pointer-events: none;
   z-index: 1;
 }
 
 header .icon.arrow {
-  right: 14px;
+  right: 10px;
   top: 50%;
   margin-top: -2px;
   pointer-events: none;
@@ -752,12 +752,12 @@ header .h-control select {
   background: #fff;
   color: #1f1f1f;
   cursor: pointer;
-  width: 104px;
-  height: 36px;
-  padding: 0 30px 0 36px;
+  width: 84px;
+  height: 32px;
+  padding: 0 24px 0 28px;
   border: 1px solid #d6d3da;
-  border-radius: 18px;
-  font-size: 14px;
+  border-radius: 16px;
+  font-size: 13px;
   font-weight: 500;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
