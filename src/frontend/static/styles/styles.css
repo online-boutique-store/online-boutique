@@ -745,89 +745,29 @@ header .icon.arrow {
   pointer-events: none;
 }
 
-header .h-control .currency-menu {
-  position: relative;
-}
-
-header .h-control .currency-menu summary {
-  list-style: none;
-  display: flex;
-  align-items: center;
+header .h-control select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background: #fff;
+  color: #1f1f1f;
+  cursor: pointer;
   width: 104px;
   height: 36px;
-  box-sizing: border-box;
   padding: 0 30px 0 36px;
   border: 1px solid #d6d3da;
   border-radius: 18px;
-  background: #fff;
-  color: #1f1f1f;
-  cursor: pointer;
   font-size: 14px;
   font-weight: 500;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-header .h-control .currency-menu summary::-webkit-details-marker {
-  display: none;
-}
-
-header .h-control .currency-menu summary::after {
-  content: "";
-  position: absolute;
-  right: 14px;
-  top: 15px;
-  width: 0;
-  height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid #605f64;
-}
-
-header .h-control .currency-menu[open] summary,
-header .h-control .currency-menu summary:hover {
+header .h-control select:hover {
   border-color: #570d2e;
 }
 
-header .h-control .currency-menu[open] summary {
+header .h-control select:focus {
+  outline: 0;
+  border-color: #570d2e;
   box-shadow: 0 0 0 3px rgba(87, 13, 46, 0.15);
-}
-
-header .h-control .currency-options {
-  position: absolute;
-  top: 42px;
-  right: 0;
-  z-index: 10;
-  min-width: 104px;
-  padding: 4px;
-  border: 1px solid #d6d3da;
-  border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 5px 16px rgba(31, 31, 31, 0.18);
-}
-
-header .h-control .currency-options form {
-  margin: 0;
-}
-
-header .h-control .currency-options button {
-  display: block;
-  width: 100%;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #1f1f1f;
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
-}
-
-header .h-control .currency-options button:hover,
-header .h-control .currency-options button[aria-current="true"] {
-  background: #f5edf1;
-  color: #570d2e;
-}
-
-header .h-control .currency-options button:focus-visible {
-  outline: 2px solid #570d2e;
-  outline-offset: -2px;
 }
